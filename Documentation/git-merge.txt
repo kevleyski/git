@@ -64,12 +64,6 @@ OPTIONS
 -------
 include::merge-options.txt[]
 
--S[<keyid>]::
---gpg-sign[=<keyid>]::
-	GPG-sign the resulting merge commit. The `keyid` argument is
-	optional and defaults to the committer identity; if specified,
-	it must be stuck to the option without a space.
-
 -m <msg>::
 	Set the commit message to be used for the merge commit (in
 	case one is created).
@@ -133,7 +127,7 @@ exception is when the changed index entries are in the state that
 would result from the merge already.)
 
 If all named commits are already ancestors of `HEAD`, 'git merge'
-will exit early with the message "Already up-to-date."
+will exit early with the message "Already up to date."
 
 FAST-FORWARD MERGE
 ------------------
@@ -280,7 +274,10 @@ After seeing a conflict, you can do two things:
 
  * Resolve the conflicts.  Git will mark the conflicts in
    the working tree.  Edit the files into shape and
-   'git add' them to the index.  Use 'git commit' to seal the deal.
+   'git add' them to the index.  Use 'git commit' or
+   'git merge --continue' to seal the deal. The latter command
+   checks whether there is a (interrupted) merge in progress
+   before calling 'git commit'.
 
 You can work through the conflict with a number of tools:
 

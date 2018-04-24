@@ -78,15 +78,15 @@ int init_tree_desc_gently(struct tree_desc *desc, const void *buffer, unsigned l
 	return result;
 }
 
-void *fill_tree_descriptor(struct tree_desc *desc, const unsigned char *sha1)
+void *fill_tree_descriptor(struct tree_desc *desc, const struct object_id *oid)
 {
 	unsigned long size = 0;
 	void *buf = NULL;
 
-	if (sha1) {
-		buf = read_object_with_reference(sha1, tree_type, &size, NULL);
+	if (oid) {
+		buf = read_object_with_reference(oid, tree_type, &size, NULL);
 		if (!buf)
-			die("unable to read tree %s", sha1_to_hex(sha1));
+			die("unable to read tree %s", oid_to_hex(oid));
 	}
 	init_tree_desc(desc, buf, size);
 	return buf;
@@ -491,7 +491,7 @@ struct dir_state {
 	unsigned char sha1[20];
 };
 
-static int find_tree_entry(struct tree_desc *t, const char *name, unsigned char *result, unsigned *mode)
+static int find_tree_entry(struct tree_desc *t, const char *name, struct object_id *result, unsigned *mode)
 {
 	int namelen = strlen(name);
 	while (t->size) {
@@ -510,7 +510,7 @@ static int find_tree_entry(struct tree_desc *t, const char *name, unsigned char 
 		if (cmp < 0)
 			break;
 		if (entrylen == namelen) {
-			hashcpy(result, oid->hash);
+			oidcpy(result, oid);
 			return 0;
 		}
 		if (name[entrylen] != '/')
@@ -518,27 +518,27 @@ static int find_tree_entry(struct tree_desc *t, const char *name, unsigned char 
 		if (!S_ISDIR(*mode))
 			break;
 		if (++entrylen == namelen) {
-			hashcpy(result, oid->hash);
+			oidcpy(result, oid);
 			return 0;
 		}
-		return get_tree_entry(oid->hash, name + entrylen, result, mode);
+		return get_tree_entry(oid, name + entrylen, result, mode);
 	}
 	return -1;
 }
 
-int get_tree_entry(const unsigned char *tree_sha1, const char *name, unsigned char *sha1, unsigned *mode)
+int get_tree_entry(const struct object_id *tree_oid, const char *name, struct object_id *oid, unsigned *mode)
 {
 	int retval;
 	void *tree;
 	unsigned long size;
-	unsigned char root[20];
+	struct object_id root;
 
-	tree = read_object_with_reference(tree_sha1, tree_type, &size, root);
+	tree = read_object_with_reference(tree_oid, tree_type, &size, &root);
 	if (!tree)
 		return -1;
 
 	if (name[0] == '\0') {
-		hashcpy(sha1, root);
+		oidcpy(oid, &root);
 		free(tree);
 		return 0;
 	}
@@ -548,7 +548,7 @@ int get_tree_entry(const unsigned char *tree_sha1, const char *name, unsigned ch
 	} else {
 		struct tree_desc t;
 		init_tree_desc(&t, tree, size);
-		retval = find_tree_entry(&t, name, sha1, mode);
+		retval = find_tree_entry(&t, name, oid, mode);
 	}
 	free(tree);
 	return retval;
@@ -581,16 +581,15 @@ enum follow_symlinks_result get_tree_entry_follow_symlinks(unsigned char *tree_s
 	int retval = MISSING_OBJECT;
 	struct dir_state *parents = NULL;
 	size_t parents_alloc = 0;
-	ssize_t parents_nr = 0;
-	unsigned char current_tree_sha1[20];
+	size_t i, parents_nr = 0;
+	struct object_id current_tree_oid;
 	struct strbuf namebuf = STRBUF_INIT;
 	struct tree_desc t;
 	int follows_remaining = GET_TREE_ENTRY_FOLLOW_SYMLINKS_MAX_LINKS;
-	int i;
 
 	init_tree_desc(&t, NULL, 0UL);
 	strbuf_addstr(&namebuf, name);
-	hashcpy(current_tree_sha1, tree_sha1);
+	hashcpy(current_tree_oid.hash, tree_sha1);
 
 	while (1) {
 		int find_result;
@@ -599,22 +598,22 @@ enum follow_symlinks_result get_tree_entry_follow_symlinks(unsigned char *tree_s
 
 		if (!t.buffer) {
 			void *tree;
-			unsigned char root[20];
+			struct object_id root;
 			unsigned long size;
-			tree = read_object_with_reference(current_tree_sha1,
+			tree = read_object_with_reference(&current_tree_oid,
 							  tree_type, &size,
-							  root);
+							  &root);
 			if (!tree)
 				goto done;
 
 			ALLOC_GROW(parents, parents_nr + 1, parents_alloc);
 			parents[parents_nr].tree = tree;
 			parents[parents_nr].size = size;
-			hashcpy(parents[parents_nr].sha1, root);
+			hashcpy(parents[parents_nr].sha1, root.hash);
 			parents_nr++;
 
 			if (namebuf.buf[0] == '\0') {
-				hashcpy(result, root);
+				hashcpy(result, root.hash);
 				retval = FOUND;
 				goto done;
 			}
@@ -671,14 +670,14 @@ enum follow_symlinks_result get_tree_entry_follow_symlinks(unsigned char *tree_s
 
 		/* Look up the first (or only) path component in the tree. */
 		find_result = find_tree_entry(&t, namebuf.buf,
-					      current_tree_sha1, mode);
+					      &current_tree_oid, mode);
 		if (find_result) {
 			goto done;
 		}
 
 		if (S_ISDIR(*mode)) {
 			if (!remainder) {
-				hashcpy(result, current_tree_sha1);
+				hashcpy(result, current_tree_oid.hash);
 				retval = FOUND;
 				goto done;
 			}
@@ -688,7 +687,7 @@ enum follow_symlinks_result get_tree_entry_follow_symlinks(unsigned char *tree_s
 				      1 + first_slash - namebuf.buf);
 		} else if (S_ISREG(*mode)) {
 			if (!remainder) {
-				hashcpy(result, current_tree_sha1);
+				hashcpy(result, current_tree_oid.hash);
 				retval = FOUND;
 			} else {
 				retval = NOT_DIR;
@@ -714,8 +713,8 @@ enum follow_symlinks_result get_tree_entry_follow_symlinks(unsigned char *tree_s
 			 */
 			retval = DANGLING_SYMLINK;
 
-			contents = read_sha1_file(current_tree_sha1, &type,
-						  &link_len);
+			contents = read_object_file(&current_tree_oid, &type,
+						    &link_len);
 
 			if (!contents)
 				goto done;
@@ -1011,7 +1010,8 @@ static enum interesting do_match(const struct name_entry *entry,
 				 * character.  More accurate matching can then
 				 * be performed in the submodule itself.
 				 */
-				if (ps->recursive && S_ISGITLINK(entry->mode) &&
+				if (ps->recurse_submodules &&
+				    S_ISGITLINK(entry->mode) &&
 				    !ps_strncmp(item, match + baselen,
 						entry->path,
 						item->nowildcard_len - baselen))
@@ -1060,7 +1060,7 @@ match_wildcards:
 		 * character.  More accurate matching can then
 		 * be performed in the submodule itself.
 		 */
-		if (ps->recursive && S_ISGITLINK(entry->mode) &&
+		if (ps->recurse_submodules && S_ISGITLINK(entry->mode) &&
 		    !ps_strncmp(item, match, base->buf + base_offset,
 				item->nowildcard_len)) {
 			strbuf_setlen(base, base_offset + baselen);

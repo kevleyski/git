@@ -3,6 +3,9 @@
  */
 #include "cache.h"
 #include "streaming.h"
+#include "repository.h"
+#include "object-store.h"
+#include "packfile.h"
 
 enum input_source {
 	stream_error = -1,
@@ -13,7 +16,7 @@ enum input_source {
 
 typedef int (*open_istream_fn)(struct git_istream *,
 			       struct object_info *,
-			       const unsigned char *,
+			       const struct object_id *,
 			       enum object_type *);
 typedef int (*close_istream_fn)(struct git_istream *);
 typedef ssize_t (*read_istream_fn)(struct git_istream *, char *, size_t);
@@ -26,7 +29,7 @@ struct stream_vtbl {
 #define open_method_decl(name) \
 	int open_istream_ ##name \
 	(struct git_istream *st, struct object_info *oi, \
-	 const unsigned char *sha1, \
+	 const struct object_id *oid, \
 	 enum object_type *type)
 
 #define close_method_decl(name) \
@@ -104,7 +107,7 @@ ssize_t read_istream(struct git_istream *st, void *buf, size_t sz)
 	return st->vtbl->read(st, buf, sz);
 }
 
-static enum input_source istream_source(const unsigned char *sha1,
+static enum input_source istream_source(const struct object_id *oid,
 					enum object_type *type,
 					struct object_info *oi)
 {
@@ -113,7 +116,7 @@ static enum input_source istream_source(const unsigned char *sha1,
 
 	oi->typep = type;
 	oi->sizep = &size;
-	status = sha1_object_info_extended(sha1, oi, 0);
+	status = oid_object_info_extended(oid, oi, 0);
 	if (status < 0)
 		return stream_error;
 
@@ -129,14 +132,14 @@ static enum input_source istream_source(const unsigned char *sha1,
 	}
 }
 
-struct git_istream *open_istream(const unsigned char *sha1,
+struct git_istream *open_istream(const struct object_id *oid,
 				 enum object_type *type,
 				 unsigned long *size,
 				 struct stream_filter *filter)
 {
 	struct git_istream *st;
 	struct object_info oi = OBJECT_INFO_INIT;
-	const unsigned char *real = lookup_replace_object(sha1);
+	const struct object_id *real = lookup_replace_object(oid);
 	enum input_source src = istream_source(real, type, &oi);
 
 	if (src < 0)
@@ -334,7 +337,8 @@ static struct stream_vtbl loose_vtbl = {
 
 static open_method_decl(loose)
 {
-	st->u.loose.mapped = map_sha1_file(sha1, &st->u.loose.mapsize);
+	st->u.loose.mapped = map_sha1_file(the_repository,
+					   oid->hash, &st->u.loose.mapsize);
 	if (!st->u.loose.mapped)
 		return -1;
 	if ((unpack_sha1_header(&st->z,
@@ -485,7 +489,7 @@ static struct stream_vtbl incore_vtbl = {
 
 static open_method_decl(incore)
 {
-	st->u.incore.buf = read_sha1_file_extended(sha1, type, &st->size, 0);
+	st->u.incore.buf = read_object_file_extended(oid, type, &st->size, 0);
 	st->u.incore.read_ptr = 0;
 	st->vtbl = &incore_vtbl;
 
@@ -506,7 +510,7 @@ int stream_blob_to_fd(int fd, const struct object_id *oid, struct stream_filter 
 	ssize_t kept = 0;
 	int result = -1;
 
-	st = open_istream(oid->hash, &type, &sz, filter);
+	st = open_istream(oid, &type, &sz, filter);
 	if (!st) {
 		if (filter)
 			free_stream_filter(filter);
@@ -539,7 +543,7 @@ int stream_blob_to_fd(int fd, const struct object_id *oid, struct stream_filter 
 			kept = 0;
 		wrote = write_in_full(fd, buf, readlen);
 
-		if (wrote != readlen)
+		if (wrote < 0)
 			goto close_and_exit;
 	}
 	if (kept && (lseek(fd, kept - 1, SEEK_CUR) == (off_t) -1 ||

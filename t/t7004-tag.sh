@@ -9,6 +9,7 @@ Tests for operations with tags.'
 
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-gpg.sh
+. "$TEST_DIRECTORY"/lib-terminal.sh
 
 # creating and listing lightweight tags:
 
@@ -451,6 +452,21 @@ test_expect_success \
 	test_cmp expect actual
 '
 
+get_tag_header annotated-tag-edit $commit commit $time >expect
+echo "An edited message" >>expect
+test_expect_success 'set up editor' '
+	write_script fakeeditor <<-\EOF
+	sed -e "s/A message/An edited message/g" <"$1" >"$1-"
+	mv "$1-" "$1"
+	EOF
+'
+test_expect_success \
+	'creating an annotated tag with -m message --edit should succeed' '
+	GIT_EDITOR=./fakeeditor git tag -m "A message" --edit annotated-tag-edit &&
+	get_tag_msg annotated-tag-edit >actual &&
+	test_cmp expect actual
+'
+
 cat >msgfile <<EOF
 Another message
 in a file.
@@ -461,6 +477,21 @@ test_expect_success \
 	'creating an annotated tag with -F messagefile should succeed' '
 	git tag -F msgfile file-annotated-tag &&
 	get_tag_msg file-annotated-tag >actual &&
+	test_cmp expect actual
+'
+
+get_tag_header file-annotated-tag-edit $commit commit $time >expect
+sed -e "s/Another message/Another edited message/g" msgfile >>expect
+test_expect_success 'set up editor' '
+	write_script fakeeditor <<-\EOF
+	sed -e "s/Another message/Another edited message/g" <"$1" >"$1-"
+	mv "$1-" "$1"
+	EOF
+'
+test_expect_success \
+	'creating an annotated tag with -F messagefile --edit should succeed' '
+	GIT_EDITOR=./fakeeditor git tag -F msgfile --edit file-annotated-tag-edit &&
+	get_tag_msg file-annotated-tag-edit >actual &&
 	test_cmp expect actual
 '
 
@@ -1862,13 +1893,6 @@ test_expect_success 'version sort with very long prerelease suffix' '
 	git tag -l --sort=version:refname
 '
 
-run_with_limited_stack () {
-	(ulimit -s 128 && "$@")
-}
-
-test_lazy_prereq ULIMIT_STACK_SIZE 'run_with_limited_stack true'
-
-# we require ulimit, this excludes Windows
 test_expect_success ULIMIT_STACK_SIZE '--contains and --no-contains work in a deep repo' '
 	>expect &&
 	i=1 &&
@@ -1887,7 +1911,7 @@ EOF"
 	run_with_limited_stack git tag --contains HEAD >actual &&
 	test_cmp expect actual &&
 	run_with_limited_stack git tag --no-contains HEAD >actual &&
-	test_line_count ">" 10 actual
+	test_line_count "-gt" 10 actual
 '
 
 test_expect_success '--format should list tags as per format given' '
@@ -1898,6 +1922,36 @@ test_expect_success '--format should list tags as per format given' '
 	EOF
 	git tag -l --format="refname : %(refname)" "v1*" >actual &&
 	test_cmp expect actual
+'
+
+test_expect_success "set up color tests" '
+	echo "<RED>v1.0<RESET>" >expect.color &&
+	echo "v1.0" >expect.bare &&
+	color_args="--format=%(color:red)%(refname:short) --list v1.0"
+'
+
+test_expect_success '%(color) omitted without tty' '
+	TERM=vt100 git tag $color_args >actual.raw &&
+	test_decode_color <actual.raw >actual &&
+	test_cmp expect.bare actual
+'
+
+test_expect_success TTY '%(color) present with tty' '
+	test_terminal git tag $color_args >actual.raw &&
+	test_decode_color <actual.raw >actual &&
+	test_cmp expect.color actual
+'
+
+test_expect_success '--color overrides auto-color' '
+	git tag --color $color_args >actual.raw &&
+	test_decode_color <actual.raw >actual &&
+	test_cmp expect.color actual
+'
+
+test_expect_success 'color.ui=always overrides auto-color' '
+	git -c color.ui=always tag $color_args >actual.raw &&
+	test_decode_color <actual.raw >actual &&
+	test_cmp expect.color actual
 '
 
 test_expect_success 'setup --merged test tags' '

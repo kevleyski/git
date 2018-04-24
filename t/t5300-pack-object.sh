@@ -16,8 +16,8 @@ test_expect_success \
      perl -e "print \"a\" x 4096;" > a &&
      perl -e "print \"b\" x 4096;" > b &&
      perl -e "print \"c\" x 4096;" > c &&
-     test-genrandom "seed a" 2097152 > a_big &&
-     test-genrandom "seed b" 2097152 > b_big &&
+     test-tool genrandom "seed a" 2097152 > a_big &&
+     test-tool genrandom "seed b" 2097152 > b_big &&
      git update-index --add a a_big b b_big c &&
      cat c >d && echo foo >>d && git update-index --add d &&
      tree=$(git write-tree) &&
@@ -311,8 +311,8 @@ test_expect_success 'unpacking with --strict' '
 	rm -f .git/index &&
 	tail -n 10 LIST | git update-index --index-info &&
 	ST=$(git write-tree) &&
-	PACK5=$( git rev-list --objects "$LIST" "$LI" "$ST" | \
-		git pack-objects test-5 ) &&
+	git rev-list --objects "$LIST" "$LI" "$ST" >actual &&
+	PACK5=$( git pack-objects test-5 <actual ) &&
 	PACK6=$( (
 			echo "$LIST"
 			echo "$LI"
@@ -358,8 +358,8 @@ test_expect_success 'index-pack with --strict' '
 	rm -f .git/index &&
 	tail -n 10 LIST | git update-index --index-info &&
 	ST=$(git write-tree) &&
-	PACK5=$( git rev-list --objects "$LIST" "$LI" "$ST" | \
-		git pack-objects test-5 ) &&
+	git rev-list --objects "$LIST" "$LI" "$ST" >actual &&
+	PACK5=$( git pack-objects test-5 <actual ) &&
 	PACK6=$( (
 			echo "$LIST"
 			echo "$LI"

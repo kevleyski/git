@@ -46,16 +46,6 @@ test_expect_success 'submodule update aborts on missing gitmodules url' '
 	test_must_fail git submodule init
 '
 
-test_expect_success 'configuration parsing' '
-	test_when_finished "rm -f .gitmodules" &&
-	cat >.gitmodules <<-\EOF &&
-	[submodule "s"]
-		path
-		ignore
-	EOF
-	test_must_fail git status
-'
-
 test_expect_success 'setup - repository in init subdirectory' '
 	mkdir init &&
 	(
@@ -831,6 +821,21 @@ test_expect_success 'moving the superproject does not break submodules' '
 	)
 '
 
+test_expect_success 'moving the submodule does not break the superproject' '
+	(
+		cd addtest2 &&
+		git submodule status
+	) >actual &&
+	sed -e "s/^ \([^ ]* repo\) .*/-\1/" <actual >expect &&
+	mv addtest2/repo addtest2/repo.bak &&
+	test_when_finished "mv addtest2/repo.bak addtest2/repo" &&
+	(
+		cd addtest2 &&
+		git submodule status
+	) >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'submodule add --name allows to replace a submodule with another at the same path' '
 	(
 		cd addtest2 &&
@@ -1221,7 +1226,7 @@ test_expect_success 'clone --recurse-submodules with a pathspec works' '
 
 	git clone --recurse-submodules="sub0" multisuper multisuper_clone &&
 	git -C multisuper_clone submodule status |cut -c1,43- >actual &&
-	test_cmp actual expected
+	test_cmp expected actual
 '
 
 test_expect_success 'clone with multiple --recurse-submodules options' '
@@ -1287,6 +1292,12 @@ test_expect_success 'init properly sets the config' '
 	git -C multisuper_clone submodule init -- sub0 sub1 &&
 	git -C multisuper_clone config --get submodule.sub0.active &&
 	test_must_fail git -C multisuper_clone config --get submodule.sub1.active
+'
+
+test_expect_success 'recursive clone respects -q' '
+	test_when_finished "rm -rf multisuper_clone" &&
+	git clone -q --recurse-submodules multisuper multisuper_clone >actual &&
+	test_must_be_empty actual
 '
 
 test_done

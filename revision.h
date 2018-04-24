@@ -4,7 +4,7 @@
 #include "parse-options.h"
 #include "grep.h"
 #include "notes.h"
-#include "commit.h"
+#include "pretty.h"
 #include "diff.h"
 
 /* Remember to update object flag allocation in object.h */
@@ -71,6 +71,13 @@ struct rev_info {
 	const char *def;
 	struct pathspec prune_data;
 
+	/*
+	 * Whether the arguments parsed by setup_revisions() included any
+	 * "input" revisions that might still have yielded an empty pending
+	 * list (e.g., patterns like "--all" or "--glob").
+	 */
+	int rev_input_given;
+
 	/* topo-sort */
 	enum rev_sort_order sort_order;
 
@@ -83,12 +90,12 @@ struct rev_info {
 	unsigned int	dense:1,
 			prune:1,
 			no_walk:2,
-			show_all:1,
 			remove_empty_trees:1,
 			simplify_history:1,
 			topo_order:1,
 			simplify_merges:1,
 			simplify_by_decoration:1,
+			single_worktree:1,
 			tag_objects:1,
 			tree_objects:1,
 			blob_objects:1,
@@ -113,7 +120,11 @@ struct rev_info {
 			bisect:1,
 			ancestry_path:1,
 			first_parent_only:1,
-			line_level_traverse:1;
+			line_level_traverse:1,
+			tree_blobs_in_commit_order:1,
+
+			/* for internal use only */
+			exclude_promisor_objects:1;
 
 	/* Diff flags */
 	unsigned int	diff:1,
@@ -142,7 +153,6 @@ struct rev_info {
 			date_mode_explicit:1,
 			preserve_subject:1;
 	unsigned int	disable_stdin:1;
-	unsigned int	leak_pending:1;
 	/* --show-linear-break */
 	unsigned int	track_linear:1,
 			track_first_time:1,
