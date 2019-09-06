@@ -32,11 +32,11 @@ int cmd_verify_tag(int argc, const char **argv, const char *prefix)
 {
 	int i = 1, verbose = 0, had_error = 0;
 	unsigned flags = 0;
-	struct ref_format format = REF_FORMAT_INIT;
+	char *fmt_pretty = NULL;
 	const struct option verify_tag_options[] = {
 		OPT__VERBOSE(&verbose, N_("print tag contents")),
 		OPT_BIT(0, "raw", &flags, N_("print raw gpg status output"), GPG_VERIFY_RAW),
-		OPT_STRING(0, "format", &format.format, N_("format"), N_("format to use for the output")),
+		OPT_STRING(  0 , "format", &fmt_pretty, N_("format"), N_("format to use for the output")),
 		OPT_END()
 	};
 
@@ -50,29 +50,26 @@ int cmd_verify_tag(int argc, const char **argv, const char *prefix)
 	if (verbose)
 		flags |= GPG_VERIFY_VERBOSE;
 
-	if (format.format) {
-		if (verify_ref_format(&format))
-			usage_with_options(verify_tag_usage,
-					   verify_tag_options);
+	if (fmt_pretty) {
+		verify_ref_format(fmt_pretty);
 		flags |= GPG_VERIFY_OMIT_STATUS;
 	}
 
 	while (i < argc) {
-		struct object_id oid;
+		unsigned char sha1[20];
 		const char *name = argv[i++];
-
-		if (get_oid(name, &oid)) {
+		if (get_sha1(name, sha1)) {
 			had_error = !!error("tag '%s' not found.", name);
 			continue;
 		}
 
-		if (gpg_verify_tag(&oid, name, flags)) {
+		if (gpg_verify_tag(sha1, name, flags)) {
 			had_error = 1;
 			continue;
 		}
 
-		if (format.format)
-			pretty_print_ref(name, oid.hash, &format);
+		if (fmt_pretty)
+			pretty_print_ref(name, sha1, fmt_pretty);
 	}
 	return had_error;
 }

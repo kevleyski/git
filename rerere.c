@@ -159,8 +159,8 @@ static struct rerere_dir *find_rerere_dir(const char *hex)
 		ALLOC_GROW(rerere_dir, rerere_dir_nr + 1, rerere_dir_alloc);
 		/* ... and add it in. */
 		rerere_dir_nr++;
-		MOVE_ARRAY(rerere_dir + pos + 1, rerere_dir + pos,
-			   rerere_dir_nr - pos - 1);
+		memmove(rerere_dir + pos + 1, rerere_dir + pos,
+			(rerere_dir_nr - pos - 1) * sizeof(*rerere_dir));
 		rerere_dir[pos] = rr_dir;
 		scan_rerere_dir(rr_dir);
 	}
@@ -258,7 +258,7 @@ static int write_rr(struct string_list *rr, int out_fd)
 				    rerere_id_hex(id),
 				    rr->items[i].string, 0);
 
-		if (write_in_full(out_fd, buf.buf, buf.len) < 0)
+		if (write_in_full(out_fd, buf.buf, buf.len) != buf.len)
 			die("unable to write rerere record");
 
 		strbuf_release(&buf);
@@ -719,9 +719,11 @@ static void update_paths(struct string_list *update)
 			item->string);
 	}
 
-	if (write_locked_index(&the_index, &index_lock,
-			       COMMIT_LOCK | SKIP_IF_UNCHANGED))
-		die("Unable to write new index file");
+	if (active_cache_changed) {
+		if (write_locked_index(&the_index, &index_lock, COMMIT_LOCK))
+			die("Unable to write new index file");
+	} else
+		rollback_lock_file(&index_lock);
 }
 
 static void remove_variant(struct rerere_id *id)
@@ -979,8 +981,8 @@ static int handle_cache(const char *path, unsigned char *sha1, const char *outpu
 			break;
 		i = ce_stage(ce) - 1;
 		if (!mmfile[i].ptr) {
-			mmfile[i].ptr = read_object_file(&ce->oid, &type,
-							 &size);
+			mmfile[i].ptr = read_sha1_file(ce->oid.hash, &type,
+						       &size);
 			mmfile[i].size = size;
 		}
 	}
@@ -1131,14 +1133,14 @@ int rerere_forget(struct pathspec *pathspec)
  * Garbage collection support
  */
 
-static timestamp_t rerere_created_at(struct rerere_id *id)
+static time_t rerere_created_at(struct rerere_id *id)
 {
 	struct stat st;
 
 	return stat(rerere_path(id, "preimage"), &st) ? (time_t) 0 : st.st_mtime;
 }
 
-static timestamp_t rerere_last_used_at(struct rerere_id *id)
+static time_t rerere_last_used_at(struct rerere_id *id)
 {
 	struct stat st;
 
@@ -1155,11 +1157,11 @@ static void unlink_rr_item(struct rerere_id *id)
 	id->collection->status[id->variant] = 0;
 }
 
-static void prune_one(struct rerere_id *id,
-		      timestamp_t cutoff_resolve, timestamp_t cutoff_noresolve)
+static void prune_one(struct rerere_id *id, time_t now,
+		      int cutoff_resolve, int cutoff_noresolve)
 {
-	timestamp_t then;
-	timestamp_t cutoff;
+	time_t then;
+	int cutoff;
 
 	then = rerere_last_used_at(id);
 	if (then)
@@ -1170,7 +1172,7 @@ static void prune_one(struct rerere_id *id,
 			return;
 		cutoff = cutoff_noresolve;
 	}
-	if (then < cutoff)
+	if (then < now - cutoff * 86400)
 		unlink_rr_item(id);
 }
 
@@ -1180,15 +1182,15 @@ void rerere_gc(struct string_list *rr)
 	DIR *dir;
 	struct dirent *e;
 	int i;
-	timestamp_t now = time(NULL);
-	timestamp_t cutoff_noresolve = now - 15 * 86400;
-	timestamp_t cutoff_resolve = now - 60 * 86400;
+	time_t now = time(NULL);
+	int cutoff_noresolve = 15;
+	int cutoff_resolve = 60;
 
 	if (setup_rerere(rr, 0) < 0)
 		return;
 
-	git_config_get_expiry_in_days("gc.rerereresolved", &cutoff_resolve, now);
-	git_config_get_expiry_in_days("gc.rerereunresolved", &cutoff_noresolve, now);
+	git_config_get_int("gc.rerereresolved", &cutoff_resolve);
+	git_config_get_int("gc.rerereunresolved", &cutoff_noresolve);
 	git_config(git_default_config, NULL);
 	dir = opendir(git_path("rr-cache"));
 	if (!dir)
@@ -1209,7 +1211,7 @@ void rerere_gc(struct string_list *rr)
 		for (id.variant = 0, id.collection = rr_dir;
 		     id.variant < id.collection->status_nr;
 		     id.variant++) {
-			prune_one(&id, cutoff_resolve, cutoff_noresolve);
+			prune_one(&id, now, cutoff_resolve, cutoff_noresolve);
 			if (id.collection->status[id.variant])
 				now_empty = 0;
 		}

@@ -460,13 +460,7 @@ test_expect_success 'submit --shelve' '
 	)
 '
 
-make_shelved_cl() {
-	test_commit "$1" >/dev/null &&
-	git p4 submit --origin HEAD^ --shelve >/dev/null &&
-	p4 -G changes -s shelved -m 1 | marshal_dump change
-}
-
-# Update existing shelved changelists
+# Update an existing shelved changelist
 
 test_expect_success 'submit --update-shelve' '
 	test_when_finished cleanup_git &&
@@ -476,19 +470,21 @@ test_expect_success 'submit --update-shelve' '
 		p4 revert ... &&
 		cd "$git" &&
 		git config git-p4.skipSubmitEdit true &&
-		shelved_cl0=$(make_shelved_cl "shelved-change-0") &&
-		echo shelved_cl0=$shelved_cl0 &&
-		shelved_cl1=$(make_shelved_cl "shelved-change-1") &&
+		test_commit "test-update-shelved-change" &&
+		git p4 submit --origin=HEAD^ --shelve &&
 
-		echo "updating shelved change lists $shelved_cl0 and $shelved_cl1" &&
+		shelf_cl=$(p4 -G changes -s shelved -m 1 |\
+			marshal_dump change) &&
+		test -n $shelf_cl &&
+		echo "updating shelved change list $shelf_cl" &&
 
 		echo "updated-line" >>shelf.t &&
 		echo added-file.t >added-file.t &&
 		git add shelf.t added-file.t &&
-		git rm -f shelved-change-1.t &&
+		git rm -f test-update-shelved-change.t &&
 		git commit --amend -C HEAD &&
 		git show --stat HEAD &&
-		git p4 submit -v --origin HEAD~2 --update-shelve $shelved_cl0 --update-shelve $shelved_cl1 &&
+		git p4 submit -v --origin HEAD^ --update-shelve $shelf_cl &&
 		echo "done git p4 submit"
 	) &&
 	(
@@ -498,7 +494,7 @@ test_expect_success 'submit --update-shelve' '
 		p4 unshelve -c $change -s $change &&
 		grep -q updated-line shelf.t &&
 		p4 describe -S $change | grep added-file.t &&
-		test_path_is_missing shelved-change-1.t
+		test_path_is_missing test-update-shelved-change.t
 	)
 '
 

@@ -6,8 +6,6 @@
 # supported) and a commit hash.
 #
 
-. ${0%/*}/lib-travisci.sh
-
 test $# -ne 2 && echo "Unexpected number of parameters" && exit 1
 test -z "$GFW_CI_TOKEN" && echo "GFW_CI_TOKEN not defined" && exit
 
@@ -69,10 +67,6 @@ esac
 
 echo "Visual Studio Team Services Build #${BUILD_ID}"
 
-# Tracing execued commands would produce too much noise in the waiting
-# loop below.
-set +x
-
 # Wait until build job finished
 STATUS=
 RESULT=
@@ -94,10 +88,7 @@ done
 # Print log
 echo ""
 echo ""
-set -x
 gfwci "action=log&buildId=$BUILD_ID" | cut -c 30-
 
 # Set exit code for TravisCI
 test "$RESULT" = "success"
-
-save_good_tree

@@ -18,19 +18,32 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include "cache.h"
 #include "quote.h"
 
-struct trace_key trace_default_key = { "GIT_TRACE", 0, 0, 0 };
-struct trace_key trace_perf_key = TRACE_KEY_INIT(PERFORMANCE);
+/*
+ * "Normalize" a key argument by converting NULL to our trace_default,
+ * and otherwise passing through the value. All caller-facing functions
+ * should normalize their inputs in this way, though most get it
+ * for free by calling get_trace_fd() (directly or indirectly).
+ */
+static void normalize_trace_key(struct trace_key **key)
+{
+	static struct trace_key trace_default = { "GIT_TRACE" };
+	if (!*key)
+		*key = &trace_default;
+}
 
 /* Get a trace file descriptor from "key" env variable. */
 static int get_trace_fd(struct trace_key *key)
 {
 	const char *trace;
+
+	normalize_trace_key(&key);
 
 	/* don't open twice */
 	if (key->initialized)
@@ -69,6 +82,8 @@ static int get_trace_fd(struct trace_key *key)
 
 void trace_disable(struct trace_key *key)
 {
+	normalize_trace_key(&key);
+
 	if (key->need_close)
 		close(key->fd);
 	key->fd = 0;
@@ -114,6 +129,7 @@ static int prepare_trace_line(const char *file, int line,
 static void trace_write(struct trace_key *key, const void *buf, unsigned len)
 {
 	if (write_in_full(get_trace_fd(key), buf, len) < 0) {
+		normalize_trace_key(&key);
 		warning("unable to write trace for %s: %s",
 			key->key, strerror(errno));
 		trace_disable(key);
@@ -131,6 +147,7 @@ static void print_trace_line(struct trace_key *key, struct strbuf *buf)
 {
 	strbuf_complete_line(buf);
 	trace_write(key, buf->buf, buf->len);
+	strbuf_release(buf);
 }
 
 static void trace_vprintf_fl(const char *file, int line, struct trace_key *key,
@@ -143,7 +160,6 @@ static void trace_vprintf_fl(const char *file, int line, struct trace_key *key,
 
 	strbuf_vaddf(&buf, format, ap);
 	print_trace_line(key, &buf);
-	strbuf_release(&buf);
 }
 
 static void trace_argv_vprintf_fl(const char *file, int line,
@@ -152,14 +168,13 @@ static void trace_argv_vprintf_fl(const char *file, int line,
 {
 	struct strbuf buf = STRBUF_INIT;
 
-	if (!prepare_trace_line(file, line, &trace_default_key, &buf))
+	if (!prepare_trace_line(file, line, NULL, &buf))
 		return;
 
 	strbuf_vaddf(&buf, format, ap);
 
-	sq_quote_argv_pretty(&buf, argv);
-	print_trace_line(&trace_default_key, &buf);
-	strbuf_release(&buf);
+	sq_quote_argv(&buf, argv, 0);
+	print_trace_line(NULL, &buf);
 }
 
 void trace_strbuf_fl(const char *file, int line, struct trace_key *key,
@@ -172,8 +187,9 @@ void trace_strbuf_fl(const char *file, int line, struct trace_key *key,
 
 	strbuf_addbuf(&buf, data);
 	print_trace_line(key, &buf);
-	strbuf_release(&buf);
 }
+
+static struct trace_key trace_perf_key = TRACE_KEY_INIT(PERFORMANCE);
 
 static void trace_performance_vprintf_fl(const char *file, int line,
 					 uint64_t nanos, const char *format,
@@ -192,7 +208,6 @@ static void trace_performance_vprintf_fl(const char *file, int line,
 	}
 
 	print_trace_line(&trace_perf_key, &buf);
-	strbuf_release(&buf);
 }
 
 #ifndef HAVE_VARIADIC_MACROS
@@ -201,7 +216,7 @@ void trace_printf(const char *format, ...)
 {
 	va_list ap;
 	va_start(ap, format);
-	trace_vprintf_fl(NULL, 0, &trace_default_key, format, ap);
+	trace_vprintf_fl(NULL, 0, NULL, format, ap);
 	va_end(ap);
 }
 
@@ -429,6 +444,6 @@ void trace_command_performance(const char **argv)
 		atexit(print_command_performance_atexit);
 
 	strbuf_reset(&command_line);
-	sq_quote_argv_pretty(&command_line, argv);
+	sq_quote_argv(&command_line, argv, 0);
 	command_start_time = getnanotime();
 }

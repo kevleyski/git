@@ -90,7 +90,7 @@ static int range_cmp(const void *_r, const void *_s)
  */
 static void range_set_check_invariants(struct range_set *rs)
 {
-	unsigned int i;
+	int i;
 
 	if (!rs)
 		return;
@@ -110,8 +110,8 @@ static void range_set_check_invariants(struct range_set *rs)
  */
 void sort_and_merge_range_set(struct range_set *rs)
 {
-	unsigned int i;
-	unsigned int o = 0; /* output cursor */
+	int i;
+	int o = 0; /* output cursor */
 
 	QSORT(rs->ranges, rs->nr, range_cmp);
 
@@ -144,36 +144,36 @@ void sort_and_merge_range_set(struct range_set *rs)
 static void range_set_union(struct range_set *out,
 			     struct range_set *a, struct range_set *b)
 {
-	unsigned int i = 0, j = 0;
+	int i = 0, j = 0;
 	struct range *ra = a->ranges;
 	struct range *rb = b->ranges;
 	/* cannot make an alias of out->ranges: it may change during grow */
 
 	assert(out->nr == 0);
 	while (i < a->nr || j < b->nr) {
-		struct range *new_range;
+		struct range *new;
 		if (i < a->nr && j < b->nr) {
 			if (ra[i].start < rb[j].start)
-				new_range = &ra[i++];
+				new = &ra[i++];
 			else if (ra[i].start > rb[j].start)
-				new_range = &rb[j++];
+				new = &rb[j++];
 			else if (ra[i].end < rb[j].end)
-				new_range = &ra[i++];
+				new = &ra[i++];
 			else
-				new_range = &rb[j++];
+				new = &rb[j++];
 		} else if (i < a->nr)      /* b exhausted */
-			new_range = &ra[i++];
+			new = &ra[i++];
 		else                       /* a exhausted */
-			new_range = &rb[j++];
-		if (new_range->start == new_range->end)
+			new = &rb[j++];
+		if (new->start == new->end)
 			; /* empty range */
-		else if (!out->nr || out->ranges[out->nr-1].end < new_range->start) {
+		else if (!out->nr || out->ranges[out->nr-1].end < new->start) {
 			range_set_grow(out, 1);
-			out->ranges[out->nr].start = new_range->start;
-			out->ranges[out->nr].end = new_range->end;
+			out->ranges[out->nr].start = new->start;
+			out->ranges[out->nr].end = new->end;
 			out->nr++;
-		} else if (out->ranges[out->nr-1].end < new_range->end) {
-			out->ranges[out->nr-1].end = new_range->end;
+		} else if (out->ranges[out->nr-1].end < new->end) {
+			out->ranges[out->nr-1].end = new->end;
 		}
 	}
 }
@@ -186,7 +186,7 @@ static void range_set_union(struct range_set *out,
 static void range_set_difference(struct range_set *out,
 				  struct range_set *a, struct range_set *b)
 {
-	unsigned int i, j =  0;
+	int i, j =  0;
 	for (i = 0; i < a->nr; i++) {
 		long start = a->ranges[i].start;
 		long end = a->ranges[i].end;
@@ -397,7 +397,7 @@ static void diff_ranges_filter_touched(struct diff_ranges *out,
 				       struct diff_ranges *diff,
 				       struct range_set *rs)
 {
-	unsigned int i, j = 0;
+	int i, j = 0;
 
 	assert(out->target.nr == 0);
 
@@ -426,7 +426,7 @@ static void range_set_shift_diff(struct range_set *out,
 				 struct range_set *rs,
 				 struct diff_ranges *diff)
 {
-	unsigned int i, j = 0;
+	int i, j = 0;
 	long offset = 0;
 	struct range *src = rs->ranges;
 	struct range *target = diff->target.ranges;
@@ -501,7 +501,8 @@ static void fill_blob_sha1(struct commit *commit, struct diff_filespec *spec)
 	unsigned mode;
 	struct object_id oid;
 
-	if (get_tree_entry(&commit->object.oid, spec->path, &oid, &mode))
+	if (get_tree_entry(commit->object.oid.hash, spec->path,
+			   oid.hash, &mode))
 		die("There is no path %s in the commit", spec->path);
 	fill_filespec(spec, &oid, 1, mode);
 
@@ -695,18 +696,18 @@ static struct line_log_data *line_log_data_merge(struct line_log_data *a,
 static void add_line_range(struct rev_info *revs, struct commit *commit,
 			   struct line_log_data *range)
 {
-	struct line_log_data *old_line = NULL;
-	struct line_log_data *new_line = NULL;
+	struct line_log_data *old = NULL;
+	struct line_log_data *new = NULL;
 
-	old_line = lookup_decoration(&revs->line_log_data, &commit->object);
-	if (old_line && range) {
-		new_line = line_log_data_merge(old_line, range);
-		free_line_log_data(old_line);
+	old = lookup_decoration(&revs->line_log_data, &commit->object);
+	if (old && range) {
+		new = line_log_data_merge(old, range);
+		free_line_log_data(old);
 	} else if (range)
-		new_line = line_log_data_copy(range);
+		new = line_log_data_copy(range);
 
-	if (new_line)
-		add_decoration(&revs->line_log_data, &commit->object, new_line);
+	if (new)
+		add_decoration(&revs->line_log_data, &commit->object, new);
 }
 
 static void clear_commit_line_range(struct rev_info *revs, struct commit *commit)
@@ -872,7 +873,7 @@ static char *output_prefix(struct diff_options *opt)
 
 static void dump_diff_hacky_one(struct rev_info *rev, struct line_log_data *range)
 {
-	unsigned int i, j = 0;
+	int i, j = 0;
 	long p_lines, t_lines;
 	unsigned long *p_ends = NULL, *t_ends = NULL;
 	struct diff_filepair *pair = range->pair;
@@ -905,7 +906,7 @@ static void dump_diff_hacky_one(struct rev_info *rev, struct line_log_data *rang
 		long t_start = range->ranges.ranges[i].start;
 		long t_end = range->ranges.ranges[i].end;
 		long t_cur = t_start;
-		unsigned int j_last;
+		int j_last;
 
 		while (j < diff->target.nr && diff->target.ranges[j].end < t_start)
 			j++;
@@ -1041,12 +1042,12 @@ static int process_diff_filepair(struct rev_info *rev,
 
 static struct diff_filepair *diff_filepair_dup(struct diff_filepair *pair)
 {
-	struct diff_filepair *new_filepair = xmalloc(sizeof(struct diff_filepair));
-	new_filepair->one = pair->one;
-	new_filepair->two = pair->two;
-	new_filepair->one->count++;
-	new_filepair->two->count++;
-	return new_filepair;
+	struct diff_filepair *new = xmalloc(sizeof(struct diff_filepair));
+	new->one = pair->one;
+	new->two = pair->two;
+	new->one->count++;
+	new->two->count++;
+	return new;
 }
 
 static void free_diffqueues(int n, struct diff_queue_struct *dq)

@@ -11,7 +11,6 @@
  */
 
 #include "builtin.h"
-#include "repository.h"
 #include "config.h"
 #include "tempfile.h"
 #include "lockfile.h"
@@ -20,8 +19,6 @@
 #include "sigchain.h"
 #include "argv-array.h"
 #include "commit.h"
-#include "packfile.h"
-#include "object-store.h"
 
 #define FAILED_RUN "failed to run %s"
 
@@ -49,7 +46,7 @@ static struct argv_array prune = ARGV_ARRAY_INIT;
 static struct argv_array prune_worktrees = ARGV_ARRAY_INIT;
 static struct argv_array rerere = ARGV_ARRAY_INIT;
 
-static struct tempfile *pidfile;
+static struct tempfile pidfile;
 static struct lock_file log_lock;
 
 static struct string_list pack_garbage = STRING_LIST_INIT_DUP;
@@ -80,7 +77,7 @@ static void process_log_file(void)
 		 */
 		int saved_errno = errno;
 		fprintf(stderr, _("Failed to fstat %s: %s"),
-			get_tempfile_path(log_lock.tempfile),
+			get_tempfile_path(&log_lock.tempfile),
 			strerror(saved_errno));
 		fflush(stderr);
 		commit_lock_file(&log_lock);
@@ -152,7 +149,7 @@ static int too_many_loose_objects(void)
 	if (!dir)
 		return 0;
 
-	auto_threshold = DIV_ROUND_UP(gc_auto_threshold, 256);
+	auto_threshold = (gc_auto_threshold + 255) / 256;
 	while ((ent = readdir(dir)) != NULL) {
 		if (strspn(ent->d_name, "0123456789abcdef") != 38 ||
 		    ent->d_name[38] != '\0')
@@ -174,7 +171,8 @@ static int too_many_packs(void)
 	if (gc_auto_pack_limit <= 0)
 		return 0;
 
-	for (cnt = 0, p = get_packed_git(the_repository); p; p = p->next) {
+	prepare_packed_git();
+	for (cnt = 0, p = packed_git; p; p = p->next) {
 		if (!p->pack_local)
 			continue;
 		if (p->pack_keep)
@@ -243,7 +241,7 @@ static const char *lock_repo_for_gc(int force, pid_t* ret_pid)
 	int fd;
 	char *pidfile_path;
 
-	if (is_tempfile_active(pidfile))
+	if (is_tempfile_active(&pidfile))
 		/* already locked */
 		return NULL;
 
@@ -259,7 +257,7 @@ static const char *lock_repo_for_gc(int force, pid_t* ret_pid)
 		int should_exit;
 
 		if (!scan_fmt)
-			scan_fmt = xstrfmt("%s %%%ds", "%"SCNuMAX, HOST_NAME_MAX);
+			scan_fmt = xstrfmt("%s %%%dc", "%"SCNuMAX, HOST_NAME_MAX);
 		fp = fopen(pidfile_path, "r");
 		memset(locking_host, 0, sizeof(locking_host));
 		should_exit =
@@ -294,7 +292,7 @@ static const char *lock_repo_for_gc(int force, pid_t* ret_pid)
 	write_in_full(fd, sb.buf, sb.len);
 	strbuf_release(&sb);
 	commit_lock_file(&lock);
-	pidfile = register_tempfile(pidfile_path);
+	register_tempfile(&pidfile, pidfile_path);
 	free(pidfile_path);
 	return NULL;
 }
@@ -361,11 +359,8 @@ int cmd_gc(int argc, const char **argv, const char *prefix)
 			N_("prune unreferenced objects"),
 			PARSE_OPT_OPTARG, NULL, (intptr_t)prune_expire },
 		OPT_BOOL(0, "aggressive", &aggressive, N_("be more thorough (increased runtime)")),
-		OPT_BOOL_F(0, "auto", &auto_gc, N_("enable auto-gc mode"),
-			   PARSE_OPT_NOCOMPLETE),
-		OPT_BOOL_F(0, "force", &force,
-			   N_("force running gc even if there may be another gc running"),
-			   PARSE_OPT_NOCOMPLETE),
+		OPT_BOOL(0, "auto", &auto_gc, N_("enable auto-gc mode")),
+		OPT_BOOL(0, "force", &force, N_("force running gc even if there may be another gc running")),
 		OPT_END()
 	};
 
@@ -419,12 +414,8 @@ int cmd_gc(int argc, const char **argv, const char *prefix)
 			if (report_last_gc_error())
 				return -1;
 
-			if (lock_repo_for_gc(force, &pid))
-				return 0;
 			if (gc_before_repack())
 				return -1;
-			delete_tempfile(&pidfile);
-
 			/*
 			 * failure to daemonize is ok, we'll continue
 			 * in foreground
@@ -462,9 +453,6 @@ int cmd_gc(int argc, const char **argv, const char *prefix)
 			argv_array_push(&prune, prune_expire);
 			if (quiet)
 				argv_array_push(&prune, "--no-progress");
-			if (repository_format_partial_clone)
-				argv_array_push(&prune,
-						"--exclude-promisor-objects");
 			if (run_command_v_opt(prune.argv, RUN_GIT_CMD))
 				return error(FAILED_RUN, prune.argv[0]);
 		}
@@ -480,7 +468,7 @@ int cmd_gc(int argc, const char **argv, const char *prefix)
 		return error(FAILED_RUN, rerere.argv[0]);
 
 	report_garbage = report_pack_garbage;
-	reprepare_packed_git(the_repository);
+	reprepare_packed_git();
 	if (pack_garbage.nr > 0)
 		clean_pack_garbage();
 

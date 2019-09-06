@@ -71,13 +71,6 @@ test_expect_success 'push --signed fails with a receiver without push certificat
 	test_i18ngrep "the receiving end does not support" err
 '
 
-test_expect_success 'push --signed=1 is accepted' '
-	prepare_dst &&
-	mkdir -p dst/.git/hooks &&
-	test_must_fail git push --signed=1 dst noop ff +noff 2>err &&
-	test_i18ngrep "the receiving end does not support" err
-'
-
 test_expect_success GPG 'no certificate for a signed push with no update' '
 	prepare_dst &&
 	mkdir -p dst/.git/hooks &&
@@ -126,11 +119,8 @@ test_expect_success GPG 'signed push sends push certificate' '
 		sed -n -e "s/^nonce /NONCE=/p" -e "/^$/q" dst/push-cert
 	) >expect &&
 
-	noop=$(git rev-parse noop) &&
-	ff=$(git rev-parse ff) &&
-	noff=$(git rev-parse noff) &&
-	grep "$noop $ff refs/heads/ff" dst/push-cert &&
-	grep "$noop $noff refs/heads/noff" dst/push-cert &&
+	grep "$(git rev-parse noop ff) refs/heads/ff" dst/push-cert &&
+	grep "$(git rev-parse noop noff) refs/heads/noff" dst/push-cert &&
 	test_cmp expect dst/push-cert-status
 '
 
@@ -210,11 +200,8 @@ test_expect_success GPG 'fail without key and heed user.signingkey' '
 		sed -n -e "s/^nonce /NONCE=/p" -e "/^$/q" dst/push-cert
 	) >expect &&
 
-	noop=$(git rev-parse noop) &&
-	ff=$(git rev-parse ff) &&
-	noff=$(git rev-parse noff) &&
-	grep "$noop $ff refs/heads/ff" dst/push-cert &&
-	grep "$noop $noff refs/heads/noff" dst/push-cert &&
+	grep "$(git rev-parse noop ff) refs/heads/ff" dst/push-cert &&
+	grep "$(git rev-parse noop noff) refs/heads/noff" dst/push-cert &&
 	test_cmp expect dst/push-cert-status
 '
 

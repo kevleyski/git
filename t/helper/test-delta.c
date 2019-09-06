@@ -8,15 +8,14 @@
  * published by the Free Software Foundation.
  */
 
-#include "test-tool.h"
 #include "git-compat-util.h"
 #include "delta.h"
 #include "cache.h"
 
 static const char usage_str[] =
-	"test-tool delta (-d|-p) <from_file> <data_file> <out_file>";
+	"test-delta (-d|-p) <from_file> <data_file> <out_file>";
 
-int cmd__delta(int argc, const char **argv)
+int cmd_main(int argc, const char **argv)
 {
 	int fd;
 	struct stat st;
@@ -70,7 +69,7 @@ int cmd__delta(int argc, const char **argv)
 	}
 
 	fd = open (argv[4], O_WRONLY|O_CREAT|O_TRUNC, 0666);
-	if (fd < 0 || write_in_full(fd, out_buf, out_size) < 0) {
+	if (fd < 0 || write_in_full(fd, out_buf, out_size) != out_size) {
 		perror(argv[4]);
 		return 1;
 	}

@@ -4,16 +4,16 @@
 #ifndef CONVERT_H
 #define CONVERT_H
 
-#include "string-list.h"
-
 struct index_state;
 
-#define CONV_EOL_RNDTRP_DIE   (1<<0) /* Die if CRLF to LF to CRLF is different */
-#define CONV_EOL_RNDTRP_WARN  (1<<1) /* Warn if CRLF to LF to CRLF is different */
-#define CONV_EOL_RENORMALIZE  (1<<2) /* Convert CRLF to LF */
-#define CONV_EOL_KEEP_CRLF    (1<<3) /* Keep CRLF line endings as is */
+enum safe_crlf {
+	SAFE_CRLF_FALSE = 0,
+	SAFE_CRLF_FAIL = 1,
+	SAFE_CRLF_WARN = 2,
+	SAFE_CRLF_RENORMALIZE = 3
+};
 
-extern int global_conv_flags_eol;
+extern enum safe_crlf safe_crlf;
 
 enum auto_crlf {
 	AUTO_CRLF_FALSE = 0,
@@ -34,26 +34,6 @@ enum eol {
 #endif
 };
 
-enum ce_delay_state {
-	CE_NO_DELAY = 0,
-	CE_CAN_DELAY = 1,
-	CE_RETRY = 2
-};
-
-struct delayed_checkout {
-	/*
-	 * State of the currently processed cache entry. If the state is
-	 * CE_CAN_DELAY, then the filter can delay the current cache entry.
-	 * If the state is CE_RETRY, then this signals the filter that the
-	 * cache entry was requested before.
-	 */
-	enum ce_delay_state state;
-	/* List of filter drivers that signaled delayed blobs. */
-	struct string_list filters;
-	/* List of delayed blobs identified by their path. */
-	struct string_list paths;
-};
-
 extern enum eol core_eol;
 extern const char *get_cached_convert_stats_ascii(const struct index_state *istate,
 						  const char *path);
@@ -63,13 +43,9 @@ extern const char *get_convert_attr_ascii(const char *path);
 /* returns 1 if *dst was used */
 extern int convert_to_git(const struct index_state *istate,
 			  const char *path, const char *src, size_t len,
-			  struct strbuf *dst, int conv_flags);
+			  struct strbuf *dst, enum safe_crlf checksafe);
 extern int convert_to_working_tree(const char *path, const char *src,
 				   size_t len, struct strbuf *dst);
-extern int async_convert_to_working_tree(const char *path, const char *src,
-					 size_t len, struct strbuf *dst,
-					 void *dco);
-extern int async_query_available_blobs(const char *cmd, struct string_list *available_paths);
 extern int renormalize_buffer(const struct index_state *istate,
 			      const char *path, const char *src, size_t len,
 			      struct strbuf *dst);
@@ -82,7 +58,7 @@ static inline int would_convert_to_git(const struct index_state *istate,
 extern void convert_to_git_filter_fd(const struct index_state *istate,
 				     const char *path, int fd,
 				     struct strbuf *dst,
-				     int conv_flags);
+				     enum safe_crlf checksafe);
 extern int would_convert_to_git_filter_fd(const char *path);
 
 /*****************************************************************
@@ -93,7 +69,7 @@ extern int would_convert_to_git_filter_fd(const char *path);
 
 struct stream_filter; /* opaque */
 
-extern struct stream_filter *get_stream_filter(const char *path, const struct object_id *);
+extern struct stream_filter *get_stream_filter(const char *path, const unsigned char *);
 extern void free_stream_filter(struct stream_filter *);
 extern int is_null_stream_filter(struct stream_filter *);
 

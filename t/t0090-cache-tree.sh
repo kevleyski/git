@@ -8,13 +8,13 @@ cache-tree extension.
  . ./test-lib.sh
 
 cmp_cache_tree () {
-	test-tool dump-cache-tree | sed -e '/#(ref)/d' >actual &&
+	test-dump-cache-tree | sed -e '/#(ref)/d' >actual &&
 	sed "s/$_x40/SHA/" <actual >filtered &&
 	test_cmp "$1" filtered
 }
 
 # We don't bother with actually checking the SHA1:
-# test-tool dump-cache-tree already verifies that all existing data is
+# test-dump-cache-tree already verifies that all existing data is
 # correct.
 generate_expected_cache_tree_rec () {
 	dir="$1${1:+/}" &&
@@ -47,7 +47,7 @@ test_cache_tree () {
 
 test_invalid_cache_tree () {
 	printf "invalid                                  %s ()\n" "" "$@" >expect &&
-	test-tool dump-cache-tree |
+	test-dump-cache-tree |
 	sed -n -e "s/[0-9]* subtrees//" -e '/#(ref)/d' -e '/^invalid /p' >actual &&
 	test_cmp expect actual
 }
@@ -115,14 +115,14 @@ test_expect_success 'update-index invalidates cache-tree' '
 '
 
 test_expect_success 'write-tree establishes cache-tree' '
-	test-tool scrap-cache-tree &&
+	test-scrap-cache-tree &&
 	git write-tree &&
 	test_cache_tree
 '
 
-test_expect_success 'test-tool scrap-cache-tree works' '
+test_expect_success 'test-scrap-cache-tree works' '
 	git read-tree HEAD &&
-	test-tool scrap-cache-tree &&
+	test-scrap-cache-tree &&
 	test_no_cache_tree
 '
 
@@ -170,7 +170,7 @@ test_expect_success 'commit in child dir has cache-tree' '
 '
 
 test_expect_success 'reset --hard gives cache-tree' '
-	test-tool scrap-cache-tree &&
+	test-scrap-cache-tree &&
 	git reset --hard &&
 	test_cache_tree
 '
@@ -246,9 +246,9 @@ test_expect_success 'switching trees does not invalidate shared index' '
 	git update-index --split-index &&
 	>split &&
 	git add split &&
-	test-tool dump-split-index .git/index | grep -v ^own >before &&
+	test-dump-split-index .git/index | grep -v ^own >before &&
 	git commit -m "as-is" &&
-	test-tool dump-split-index .git/index | grep -v ^own >after &&
+	test-dump-split-index .git/index | grep -v ^own >after &&
 	test_cmp before after
 '
 

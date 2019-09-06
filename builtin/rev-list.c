@@ -4,8 +4,6 @@
 #include "diff.h"
 #include "revision.h"
 #include "list-objects.h"
-#include "list-objects-filter.h"
-#include "list-objects-filter-options.h"
 #include "pack.h"
 #include "pack-bitmap.h"
 #include "builtin.h"
@@ -13,9 +11,6 @@
 #include "graph.h"
 #include "bisect.h"
 #include "progress.h"
-#include "reflog-walk.h"
-#include "oidset.h"
-#include "packfile.h"
 
 static const char rev_list_usage[] =
 "git rev-list [OPTION] <commit-id>... [ -- paths... ]\n"
@@ -59,21 +54,6 @@ static const char rev_list_usage[] =
 static struct progress *progress;
 static unsigned progress_counter;
 
-static struct list_objects_filter_options filter_options;
-static struct oidset omitted_objects;
-static int arg_print_omitted; /* print objects omitted by filter */
-
-static struct oidset missing_objects;
-enum missing_action {
-	MA_ERROR = 0,    /* fail if any missing objects are encountered */
-	MA_ALLOW_ANY,    /* silently allow ALL missing objects */
-	MA_PRINT,        /* print ALL missing objects in special section */
-	MA_ALLOW_PROMISOR, /* silently allow all missing PROMISOR objects */
-};
-static enum missing_action arg_missing_action;
-
-#define DEFAULT_OIDSET_SIZE     (16*1024)
-
 static void finish_commit(struct commit *commit, void *data);
 static void show_commit(struct commit *commit, void *data)
 {
@@ -108,7 +88,7 @@ static void show_commit(struct commit *commit, void *data)
 	if (!revs->graph)
 		fputs(get_revision_mark(revs, commit), stdout);
 	if (revs->abbrev_commit && revs->abbrev)
-		fputs(find_unique_abbrev(&commit->object.oid, revs->abbrev),
+		fputs(find_unique_abbrev(commit->object.oid.hash, revs->abbrev),
 		      stdout);
 	else
 		fputs(oid_to_hex(&commit->object.oid), stdout);
@@ -134,7 +114,7 @@ static void show_commit(struct commit *commit, void *data)
 	else
 		putchar('\n');
 
-	if (revs->verbose_header) {
+	if (revs->verbose_header && get_cached_commit_buffer(commit, NULL)) {
 		struct strbuf buf = STRBUF_INIT;
 		struct pretty_print_context ctx = {0};
 		ctx.abbrev = revs->abbrev;
@@ -142,7 +122,6 @@ static void show_commit(struct commit *commit, void *data)
 		ctx.date_mode_explicit = revs->date_mode_explicit;
 		ctx.fmt = revs->commit_format;
 		ctx.output_encoding = get_log_output_encoding();
-		ctx.color = revs->diffopt.use_color;
 		pretty_print_commit(&ctx, commit, &buf);
 		if (buf.len) {
 			if (revs->commit_format != CMIT_FMT_ONELINE)
@@ -197,56 +176,19 @@ static void finish_commit(struct commit *commit, void *data)
 	free_commit_buffer(commit);
 }
 
-static inline void finish_object__ma(struct object *obj)
-{
-	/*
-	 * Whether or not we try to dynamically fetch missing objects
-	 * from the server, we currently DO NOT have the object.  We
-	 * can either print, allow (ignore), or conditionally allow
-	 * (ignore) them.
-	 */
-	switch (arg_missing_action) {
-	case MA_ERROR:
-		die("missing blob object '%s'", oid_to_hex(&obj->oid));
-		return;
-
-	case MA_ALLOW_ANY:
-		return;
-
-	case MA_PRINT:
-		oidset_insert(&missing_objects, &obj->oid);
-		return;
-
-	case MA_ALLOW_PROMISOR:
-		if (is_promisor_object(&obj->oid))
-			return;
-		die("unexpected missing blob object '%s'",
-		    oid_to_hex(&obj->oid));
-		return;
-
-	default:
-		BUG("unhandled missing_action");
-		return;
-	}
-}
-
-static int finish_object(struct object *obj, const char *name, void *cb_data)
+static void finish_object(struct object *obj, const char *name, void *cb_data)
 {
 	struct rev_list_info *info = cb_data;
-	if (obj->type == OBJ_BLOB && !has_object_file(&obj->oid)) {
-		finish_object__ma(obj);
-		return 1;
-	}
+	if (obj->type == OBJ_BLOB && !has_object_file(&obj->oid))
+		die("missing blob object '%s'", oid_to_hex(&obj->oid));
 	if (info->revs->verify_objects && !obj->parsed && obj->type != OBJ_COMMIT)
 		parse_object(&obj->oid);
-	return 0;
 }
 
 static void show_object(struct object *obj, const char *name, void *cb_data)
 {
 	struct rev_list_info *info = cb_data;
-	if (finish_object(obj, name, cb_data))
-		return;
+	finish_object(obj, name, cb_data);
 	display_progress(progress, ++progress_counter);
 	if (info->flags & REV_LIST_QUIET)
 		return;
@@ -314,43 +256,15 @@ static int show_bisect_vars(struct rev_list_info *info, int reaches, int all)
 }
 
 static int show_object_fast(
-	const struct object_id *oid,
+	const unsigned char *sha1,
 	enum object_type type,
 	int exclude,
 	uint32_t name_hash,
 	struct packed_git *found_pack,
 	off_t found_offset)
 {
-	fprintf(stdout, "%s\n", oid_to_hex(oid));
+	fprintf(stdout, "%s\n", sha1_to_hex(sha1));
 	return 1;
-}
-
-static inline int parse_missing_action_value(const char *value)
-{
-	if (!strcmp(value, "error")) {
-		arg_missing_action = MA_ERROR;
-		return 1;
-	}
-
-	if (!strcmp(value, "allow-any")) {
-		arg_missing_action = MA_ALLOW_ANY;
-		fetch_if_missing = 0;
-		return 1;
-	}
-
-	if (!strcmp(value, "print")) {
-		arg_missing_action = MA_PRINT;
-		fetch_if_missing = 0;
-		return 1;
-	}
-
-	if (!strcmp(value, "allow-promisor")) {
-		arg_missing_action = MA_ALLOW_PROMISOR;
-		fetch_if_missing = 0;
-		return 1;
-	}
-
-	return 0;
 }
 
 int cmd_rev_list(int argc, const char **argv, const char *prefix)
@@ -371,35 +285,6 @@ int cmd_rev_list(int argc, const char **argv, const char *prefix)
 	init_revisions(&revs, prefix);
 	revs.abbrev = DEFAULT_ABBREV;
 	revs.commit_format = CMIT_FMT_UNSPECIFIED;
-
-	/*
-	 * Scan the argument list before invoking setup_revisions(), so that we
-	 * know if fetch_if_missing needs to be set to 0.
-	 *
-	 * "--exclude-promisor-objects" acts as a pre-filter on missing objects
-	 * by not crossing the boundary from realized objects to promisor
-	 * objects.
-	 *
-	 * Let "--missing" to conditionally set fetch_if_missing.
-	 */
-	for (i = 1; i < argc; i++) {
-		const char *arg = argv[i];
-		if (!strcmp(arg, "--exclude-promisor-objects")) {
-			fetch_if_missing = 0;
-			revs.exclude_promisor_objects = 1;
-			break;
-		}
-	}
-	for (i = 1; i < argc; i++) {
-		const char *arg = argv[i];
-		if (skip_prefix(arg, "--missing=", &arg)) {
-			if (revs.exclude_promisor_objects)
-				die(_("cannot combine --exclude-promisor-objects and --missing"));
-			if (parse_missing_action_value(arg))
-				break;
-		}
-	}
-
 	argc = setup_revisions(argc, argv, &revs, NULL);
 
 	memset(&info, 0, sizeof(info));
@@ -407,7 +292,7 @@ int cmd_rev_list(int argc, const char **argv, const char *prefix)
 	if (revs.bisect)
 		bisect_list = 1;
 
-	if (revs.diffopt.flags.quick)
+	if (DIFF_OPT_TST(&revs.diffopt, QUICK))
 		info.flags |= REV_LIST_QUIET;
 	for (i = 1 ; i < argc; i++) {
 		const char *arg = argv[i];
@@ -448,31 +333,6 @@ int cmd_rev_list(int argc, const char **argv, const char *prefix)
 			show_progress = arg;
 			continue;
 		}
-
-		if (skip_prefix(arg, ("--" CL_ARG__FILTER "="), &arg)) {
-			parse_list_objects_filter(&filter_options, arg);
-			if (filter_options.choice && !revs.blob_objects)
-				die(_("object filtering requires --objects"));
-			if (filter_options.choice == LOFC_SPARSE_OID &&
-			    !filter_options.sparse_oid_value)
-				die(_("invalid sparse value '%s'"),
-				    filter_options.filter_spec);
-			continue;
-		}
-		if (!strcmp(arg, ("--no-" CL_ARG__FILTER))) {
-			list_objects_filter_set_no_filter(&filter_options);
-			continue;
-		}
-		if (!strcmp(arg, "--filter-print-omitted")) {
-			arg_print_omitted = 1;
-			continue;
-		}
-
-		if (!strcmp(arg, "--exclude-promisor-objects"))
-			continue; /* already handled above */
-		if (skip_prefix(arg, "--missing=", &arg))
-			continue; /* already handled above */
-
 		usage(rev_list_usage);
 
 	}
@@ -488,18 +348,14 @@ int cmd_rev_list(int argc, const char **argv, const char *prefix)
 		/* Only --header was specified */
 		revs.commit_format = CMIT_FMT_RAW;
 
-	if ((!revs.commits && reflog_walk_empty(revs.reflog_info) &&
+	if ((!revs.commits &&
 	     (!(revs.tag_objects || revs.tree_objects || revs.blob_objects) &&
-	      !revs.pending.nr) &&
-	     !revs.rev_input_given) ||
+	      !revs.pending.nr)) ||
 	    revs.diff)
 		usage(rev_list_usage);
 
 	if (revs.show_notes)
 		die(_("rev-list does not support display of notes"));
-
-	if (filter_options.choice && use_bitmap_index)
-		die(_("cannot combine --use-bitmap-index with object filtering"));
 
 	save_commit_buffer = (revs.verbose_header ||
 			      revs.grep_filter.pattern_list ||
@@ -508,7 +364,7 @@ int cmd_rev_list(int argc, const char **argv, const char *prefix)
 		revs.limited = 1;
 
 	if (show_progress)
-		progress = start_delayed_progress(show_progress, 0);
+		progress = start_progress_delay(show_progress, 0, 0, 2);
 
 	if (use_bitmap_index && !revs.prune) {
 		if (revs.count && !revs.left_right && !revs.cherry_mark) {
@@ -536,39 +392,16 @@ int cmd_rev_list(int argc, const char **argv, const char *prefix)
 		mark_edges_uninteresting(&revs, show_edge);
 
 	if (bisect_list) {
-		int reaches, all;
+		int reaches = reaches, all = all;
 
-		find_bisection(&revs.commits, &reaches, &all, bisect_find_all);
+		revs.commits = find_bisection(revs.commits, &reaches, &all,
+					      bisect_find_all);
 
 		if (bisect_show_vars)
 			return show_bisect_vars(&info, reaches, all);
 	}
 
-	if (arg_print_omitted)
-		oidset_init(&omitted_objects, DEFAULT_OIDSET_SIZE);
-	if (arg_missing_action == MA_PRINT)
-		oidset_init(&missing_objects, DEFAULT_OIDSET_SIZE);
-
-	traverse_commit_list_filtered(
-		&filter_options, &revs, show_commit, show_object, &info,
-		(arg_print_omitted ? &omitted_objects : NULL));
-
-	if (arg_print_omitted) {
-		struct oidset_iter iter;
-		struct object_id *oid;
-		oidset_iter_init(&omitted_objects, &iter);
-		while ((oid = oidset_iter_next(&iter)))
-			printf("~%s\n", oid_to_hex(oid));
-		oidset_clear(&omitted_objects);
-	}
-	if (arg_missing_action == MA_PRINT) {
-		struct oidset_iter iter;
-		struct object_id *oid;
-		oidset_iter_init(&missing_objects, &iter);
-		while ((oid = oidset_iter_next(&iter)))
-			printf("?%s\n", oid_to_hex(oid));
-		oidset_clear(&missing_objects);
-	}
+	traverse_commit_list(&revs, show_commit, show_object, &info);
 
 	stop_progress(&progress);
 

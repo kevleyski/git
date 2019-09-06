@@ -1,7 +1,4 @@
 
-/*
- * Hello comment.
- */
 static void hello(void)	// Begin of hello
 {
 	/*

@@ -539,62 +539,25 @@ cat >trailers <<EOF
 Signed-off-by: A U Thor <author@example.com>
 Acked-by: A U Thor <author@example.com>
 [ v2 updated patch description ]
-Signed-off-by: A U Thor
-  <author@example.com>
+Signed-off-by: A U Thor <author@example.com>
 EOF
 
-unfold () {
-	perl -0pe 's/\n\s+/ /g'
-}
-
-test_expect_success 'set up trailer tests' '
+test_expect_success 'pretty format %(trailers) shows trailers' '
 	echo "Some contents" >trailerfile &&
 	git add trailerfile &&
-	git commit -F - <<-EOF
+	git commit -F - <<-EOF &&
 	trailers: this commit message has trailers
 
 	This commit is a test commit with trailers at the end. We parse this
-	message and display the trailers using %(trailers).
+	message and display the trailers using %bT
 
 	$(cat trailers)
 	EOF
-'
-
-test_expect_success 'pretty format %(trailers) shows trailers' '
 	git log --no-walk --pretty="%(trailers)" >actual &&
-	{
-		cat trailers &&
-		echo
-	} >expect &&
-	test_cmp expect actual
-'
+	cat >expect <<-EOF &&
+	$(cat trailers)
 
-test_expect_success '%(trailers:only) shows only "key: value" trailers' '
-	git log --no-walk --pretty="%(trailers:only)" >actual &&
-	{
-		grep -v patch.description <trailers &&
-		echo
-	} >expect &&
-	test_cmp expect actual
-'
-
-test_expect_success '%(trailers:unfold) unfolds trailers' '
-	git log --no-walk --pretty="%(trailers:unfold)" >actual &&
-	{
-		unfold <trailers &&
-		echo
-	} >expect &&
-	test_cmp expect actual
-'
-
-test_expect_success ':only and :unfold work together' '
-	git log --no-walk --pretty="%(trailers:only,unfold)" >actual &&
-	git log --no-walk --pretty="%(trailers:unfold,only)" >reverse &&
-	test_cmp actual reverse &&
-	{
-		grep -v patch.description <trailers | unfold &&
-		echo
-	} >expect &&
+	EOF
 	test_cmp expect actual
 '
 

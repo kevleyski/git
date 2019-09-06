@@ -8,8 +8,8 @@
  * sha1.
  */
 static struct replace_object {
-	struct object_id original;
-	struct object_id replacement;
+	unsigned char original[20];
+	unsigned char replacement[20];
 } **replace_object;
 
 static int replace_object_alloc, replace_object_nr;
@@ -17,7 +17,7 @@ static int replace_object_alloc, replace_object_nr;
 static const unsigned char *replace_sha1_access(size_t index, void *table)
 {
 	struct replace_object **replace = table;
-	return replace[index]->original.hash;
+	return replace[index]->original;
 }
 
 static int replace_object_pos(const unsigned char *sha1)
@@ -29,7 +29,7 @@ static int replace_object_pos(const unsigned char *sha1)
 static int register_replace_object(struct replace_object *replace,
 				   int ignore_dups)
 {
-	int pos = replace_object_pos(replace->original.hash);
+	int pos = replace_object_pos(replace->original);
 
 	if (0 <= pos) {
 		if (ignore_dups)
@@ -44,8 +44,10 @@ static int register_replace_object(struct replace_object *replace,
 	ALLOC_GROW(replace_object, replace_object_nr + 1, replace_object_alloc);
 	replace_object_nr++;
 	if (pos < replace_object_nr)
-		MOVE_ARRAY(replace_object + pos + 1, replace_object + pos,
-			   replace_object_nr - pos - 1);
+		memmove(replace_object + pos + 1,
+			replace_object + pos,
+			(replace_object_nr - pos - 1) *
+			sizeof(*replace_object));
 	replace_object[pos] = replace;
 	return 0;
 }
@@ -59,14 +61,14 @@ static int register_replace_ref(const char *refname,
 	const char *hash = slash ? slash + 1 : refname;
 	struct replace_object *repl_obj = xmalloc(sizeof(*repl_obj));
 
-	if (get_oid_hex(hash, &repl_obj->original)) {
+	if (strlen(hash) != 40 || get_sha1_hex(hash, repl_obj->original)) {
 		free(repl_obj);
 		warning("bad replace ref name: %s", refname);
 		return 0;
 	}
 
 	/* Copy sha1 from the read ref */
-	oidcpy(&repl_obj->replacement, oid);
+	hashcpy(repl_obj->replacement, oid->hash);
 
 	/* Register new object */
 	if (register_replace_object(repl_obj, 1))
@@ -92,16 +94,16 @@ static void prepare_replace_object(void)
 #define MAXREPLACEDEPTH 5
 
 /*
- * If a replacement for object oid has been set up, return the
+ * If a replacement for object sha1 has been set up, return the
  * replacement object's name (replaced recursively, if necessary).
- * The return value is either oid or a pointer to a
+ * The return value is either sha1 or a pointer to a
  * permanently-allocated value.  This function always respects replace
  * references, regardless of the value of check_replace_refs.
  */
-const struct object_id *do_lookup_replace_object(const struct object_id *oid)
+const unsigned char *do_lookup_replace_object(const unsigned char *sha1)
 {
 	int pos, depth = MAXREPLACEDEPTH;
-	const struct object_id *cur = oid;
+	const unsigned char *cur = sha1;
 
 	prepare_replace_object();
 
@@ -109,11 +111,11 @@ const struct object_id *do_lookup_replace_object(const struct object_id *oid)
 	do {
 		if (--depth < 0)
 			die("replace depth too high for object %s",
-			    oid_to_hex(oid));
+			    sha1_to_hex(sha1));
 
-		pos = replace_object_pos(cur->hash);
+		pos = replace_object_pos(cur);
 		if (0 <= pos)
-			cur = &replace_object[pos]->replacement;
+			cur = replace_object[pos]->replacement;
 	} while (0 <= pos);
 
 	return cur;

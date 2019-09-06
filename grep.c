@@ -18,11 +18,6 @@ static void std_output(struct grep_opt *opt, const void *buf, size_t size)
 	fwrite(buf, size, 1, stdout);
 }
 
-static void color_set(char *dst, const char *color_bytes)
-{
-	xsnprintf(dst, COLOR_MAXLEN, "%s", color_bytes);
-}
-
 /*
  * Initialize the grep_defaults template with hardcoded defaults.
  * We could let the compiler do this, but without C99 initializers
@@ -40,8 +35,10 @@ void init_grep_defaults(void)
 	memset(opt, 0, sizeof(*opt));
 	opt->relative = 1;
 	opt->pathname = 1;
+	opt->regflags = REG_NEWLINE;
 	opt->max_depth = -1;
 	opt->pattern_type_option = GREP_PATTERN_TYPE_UNSPECIFIED;
+	opt->extended_regexp_option = 0;
 	color_set(opt->color_context, "");
 	color_set(opt->color_filename, "");
 	color_set(opt->color_function, "");
@@ -82,7 +79,10 @@ int grep_config(const char *var, const char *value, void *cb)
 		return -1;
 
 	if (!strcmp(var, "grep.extendedregexp")) {
-		opt->extended_regexp_option = git_config_bool(var, value);
+		if (git_config_bool(var, value))
+			opt->extended_regexp_option = 1;
+		else
+			opt->extended_regexp_option = 0;
 		return 0;
 	}
 
@@ -157,6 +157,7 @@ void grep_init(struct grep_opt *opt, const char *prefix)
 	opt->linenum = def->linenum;
 	opt->max_depth = def->max_depth;
 	opt->pathname = def->pathname;
+	opt->regflags = def->regflags;
 	opt->relative = def->relative;
 	opt->output = def->output;
 
@@ -172,41 +173,33 @@ void grep_init(struct grep_opt *opt, const char *prefix)
 
 static void grep_set_pattern_type_option(enum grep_pattern_type pattern_type, struct grep_opt *opt)
 {
-	/*
-	 * When committing to the pattern type by setting the relevant
-	 * fields in grep_opt it's generally not necessary to zero out
-	 * the fields we're not choosing, since they won't have been
-	 * set by anything. The extended_regexp_option field is the
-	 * only exception to this.
-	 *
-	 * This is because in the process of parsing grep.patternType
-	 * & grep.extendedRegexp we set opt->pattern_type_option and
-	 * opt->extended_regexp_option, respectively. We then
-	 * internally use opt->extended_regexp_option to see if we're
-	 * compiling an ERE. It must be unset if that's not actually
-	 * the case.
-	 */
-	if (pattern_type != GREP_PATTERN_TYPE_ERE &&
-	    opt->extended_regexp_option)
-		opt->extended_regexp_option = 0;
-
 	switch (pattern_type) {
 	case GREP_PATTERN_TYPE_UNSPECIFIED:
 		/* fall through */
 
 	case GREP_PATTERN_TYPE_BRE:
+		opt->fixed = 0;
+		opt->pcre1 = 0;
+		opt->pcre2 = 0;
 		break;
 
 	case GREP_PATTERN_TYPE_ERE:
-		opt->extended_regexp_option = 1;
+		opt->fixed = 0;
+		opt->pcre1 = 0;
+		opt->pcre2 = 0;
+		opt->regflags |= REG_EXTENDED;
 		break;
 
 	case GREP_PATTERN_TYPE_FIXED:
 		opt->fixed = 1;
+		opt->pcre1 = 0;
+		opt->pcre2 = 0;
 		break;
 
 	case GREP_PATTERN_TYPE_PCRE:
+		opt->fixed = 0;
 #ifdef USE_LIBPCRE2
+		opt->pcre1 = 0;
 		opt->pcre2 = 1;
 #else
 		/*
@@ -216,6 +209,7 @@ static void grep_set_pattern_type_option(enum grep_pattern_type pattern_type, st
 		 * "cannot use Perl-compatible regexes[...]".
 		 */
 		opt->pcre1 = 1;
+		opt->pcre2 = 0;
 #endif
 		break;
 	}
@@ -228,11 +222,6 @@ void grep_commit_pattern_type(enum grep_pattern_type pattern_type, struct grep_o
 	else if (opt->pattern_type_option != GREP_PATTERN_TYPE_UNSPECIFIED)
 		grep_set_pattern_type_option(opt->pattern_type_option, opt);
 	else if (opt->extended_regexp_option)
-		/*
-		 * This branch *must* happen after setting from the
-		 * opt->pattern_type_option above, we don't want
-		 * grep.extendedRegexp to override grep.patternType!
-		 */
 		grep_set_pattern_type_option(GREP_PATTERN_TYPE_ERE, opt);
 }
 
@@ -392,7 +381,7 @@ static void compile_pcre1_regexp(struct grep_pat *p, const struct grep_opt *opt)
 	if (!p->pcre1_regexp)
 		compile_regexp_failed(p, error);
 
-	p->pcre1_extra_info = pcre_study(p->pcre1_regexp, GIT_PCRE_STUDY_JIT_COMPILE, &error);
+	p->pcre1_extra_info = pcre_study(p->pcre1_regexp, PCRE_STUDY_JIT_COMPILE, &error);
 	if (!p->pcre1_extra_info && error)
 		die("%s", error);
 
@@ -482,8 +471,6 @@ static void compile_pcre2_pattern(struct grep_pat *p, const struct grep_opt *opt
 	int options = PCRE2_MULTILINE;
 	const uint8_t *character_tables = NULL;
 	int jitret;
-	int patinforet;
-	size_t jitsizearg;
 
 	assert(opt->pcre2);
 
@@ -518,30 +505,6 @@ static void compile_pcre2_pattern(struct grep_pat *p, const struct grep_opt *opt
 		jitret = pcre2_jit_compile(p->pcre2_pattern, PCRE2_JIT_COMPLETE);
 		if (jitret)
 			die("Couldn't JIT the PCRE2 pattern '%s', got '%d'\n", p->pattern, jitret);
-
-		/*
-		 * The pcre2_config(PCRE2_CONFIG_JIT, ...) call just
-		 * tells us whether the library itself supports JIT,
-		 * but to see whether we're going to be actually using
-		 * JIT we need to extract PCRE2_INFO_JITSIZE from the
-		 * pattern *after* we do pcre2_jit_compile() above.
-		 *
-		 * This is because if the pattern contains the
-		 * (*NO_JIT) verb (see pcre2syntax(3))
-		 * pcre2_jit_compile() will exit early with 0. If we
-		 * then proceed to call pcre2_jit_match() further down
-		 * the line instead of pcre2_match() we'll either
-		 * segfault (pre PCRE 10.31) or run into a fatal error
-		 * (post PCRE2 10.31)
-		 */
-		patinforet = pcre2_pattern_info(p->pcre2_pattern, PCRE2_INFO_JITSIZE, &jitsizearg);
-		if (patinforet)
-			BUG("pcre2_pattern_info() failed: %d", patinforet);
-		if (jitsizearg == 0) {
-			p->pcre2_jit_on = 0;
-			return;
-		}
-
 		p->pcre2_jit_stack = pcre2_jit_stack_create(1, 1024 * 1024, NULL);
 		if (!p->pcre2_jit_stack)
 			die("Couldn't allocate PCRE2 JIT stack");
@@ -624,7 +587,7 @@ static void compile_fixed_regexp(struct grep_pat *p, struct grep_opt *opt)
 {
 	struct strbuf sb = STRBUF_INIT;
 	int err;
-	int regflags = 0;
+	int regflags = opt->regflags;
 
 	basic_regex_quote_buf(&sb, p->pattern);
 	if (opt->ignore_case)
@@ -643,12 +606,12 @@ static void compile_fixed_regexp(struct grep_pat *p, struct grep_opt *opt)
 
 static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 {
-	int ascii_only;
+	int icase, ascii_only;
 	int err;
-	int regflags = REG_NEWLINE;
 
 	p->word_regexp = opt->word_regexp;
 	p->ignore_case = opt->ignore_case;
+	icase	       = opt->regflags & REG_ICASE || p->ignore_case;
 	ascii_only     = !has_non_ascii(p->pattern);
 
 	/*
@@ -666,10 +629,12 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 	if (opt->fixed ||
 	    has_null(p->pattern, p->patternlen) ||
 	    is_fixed(p->pattern, p->patternlen))
-		p->fixed = !p->ignore_case || ascii_only;
+		p->fixed = !icase || ascii_only;
+	else
+		p->fixed = 0;
 
 	if (p->fixed) {
-		p->kws = kwsalloc(p->ignore_case ? tolower_trans_tbl : NULL);
+		p->kws = kwsalloc(icase ? tolower_trans_tbl : NULL);
 		kwsincr(p->kws, p->pattern, p->patternlen);
 		kwsprep(p->kws);
 		return;
@@ -693,11 +658,7 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 		return;
 	}
 
-	if (p->ignore_case)
-		regflags |= REG_ICASE;
-	if (opt->extended_regexp_option)
-		regflags |= REG_EXTENDED;
-	err = regcomp(&p->regexp, p->pattern, regflags);
+	err = regcomp(&p->regexp, p->pattern, opt->regflags);
 	if (err) {
 		char errbuf[1024];
 		regerror(err, &p->regexp, errbuf, 1024);
@@ -1507,52 +1468,31 @@ static void show_funcname_line(struct grep_opt *opt, struct grep_source *gs,
 	}
 }
 
-static int is_empty_line(const char *bol, const char *eol);
-
 static void show_pre_context(struct grep_opt *opt, struct grep_source *gs,
 			     char *bol, char *end, unsigned lno)
 {
-	unsigned cur = lno, from = 1, funcname_lno = 0, orig_from;
-	int funcname_needed = !!opt->funcname, comment_needed = 0;
+	unsigned cur = lno, from = 1, funcname_lno = 0;
+	int funcname_needed = !!opt->funcname;
+
+	if (opt->funcbody && !match_funcname(opt, gs, bol, end))
+		funcname_needed = 2;
 
 	if (opt->pre_context < lno)
 		from = lno - opt->pre_context;
 	if (from <= opt->last_shown)
 		from = opt->last_shown + 1;
-	orig_from = from;
-	if (opt->funcbody) {
-		if (match_funcname(opt, gs, bol, end))
-			comment_needed = 1;
-		else
-			funcname_needed = 1;
-		from = opt->last_shown + 1;
-	}
 
 	/* Rewind. */
-	while (bol > gs->buf && cur > from) {
-		char *next_bol = bol;
+	while (bol > gs->buf &&
+	       cur > (funcname_needed == 2 ? opt->last_shown + 1 : from)) {
 		char *eol = --bol;
 
 		while (bol > gs->buf && bol[-1] != '\n')
 			bol--;
 		cur--;
-		if (comment_needed && (is_empty_line(bol, eol) ||
-				       match_funcname(opt, gs, bol, eol))) {
-			comment_needed = 0;
-			from = orig_from;
-			if (cur < from) {
-				cur++;
-				bol = next_bol;
-				break;
-			}
-		}
 		if (funcname_needed && match_funcname(opt, gs, bol, eol)) {
 			funcname_lno = cur;
 			funcname_needed = 0;
-			if (opt->funcbody)
-				comment_needed = 1;
-			else
-				from = orig_from;
 		}
 	}
 
@@ -1873,7 +1813,7 @@ static int grep_source_1(struct grep_opt *opt, struct grep_source *gs, int colle
 		return 0;
 
 	if (opt->status_only)
-		return opt->unmatch_name_only;
+		return 0;
 	if (opt->unmatch_name_only) {
 		/* We did not see any hit, so we want to show this */
 		show_name(opt, gs->name);
@@ -1979,6 +1919,16 @@ void grep_source_init(struct grep_source *gs, enum grep_source_type type,
 	case GREP_SOURCE_FILE:
 		gs->identifier = xstrdup(identifier);
 		break;
+	case GREP_SOURCE_SUBMODULE:
+		if (!identifier) {
+			gs->identifier = NULL;
+			break;
+		}
+		/*
+		 * FALL THROUGH
+		 * If the identifier is non-NULL (in the submodule case) it
+		 * will be a SHA1 that needs to be copied.
+		 */
 	case GREP_SOURCE_OID:
 		gs->identifier = oiddup(identifier);
 		break;
@@ -2001,6 +1951,7 @@ void grep_source_clear_data(struct grep_source *gs)
 	switch (gs->type) {
 	case GREP_SOURCE_FILE:
 	case GREP_SOURCE_OID:
+	case GREP_SOURCE_SUBMODULE:
 		FREE_AND_NULL(gs->buf);
 		gs->size = 0;
 		break;
@@ -2015,7 +1966,7 @@ static int grep_source_load_oid(struct grep_source *gs)
 	enum object_type type;
 
 	grep_read_lock();
-	gs->buf = read_object_file(gs->identifier, &type, &gs->size);
+	gs->buf = read_sha1_file(gs->identifier, &type, &gs->size);
 	grep_read_unlock();
 
 	if (!gs->buf)
@@ -2071,6 +2022,8 @@ static int grep_source_load(struct grep_source *gs)
 		return grep_source_load_oid(gs);
 	case GREP_SOURCE_BUF:
 		return gs->buf ? 0 : -1;
+	case GREP_SOURCE_SUBMODULE:
+		break;
 	}
 	die("BUG: invalid grep_source type to load");
 }

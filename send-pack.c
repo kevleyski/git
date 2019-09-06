@@ -37,14 +37,14 @@ int option_parse_push_signed(const struct option *opt,
 	die("bad %s argument: %s", opt->long_name, arg);
 }
 
-static void feed_object(const struct object_id *oid, FILE *fh, int negative)
+static void feed_object(const unsigned char *sha1, FILE *fh, int negative)
 {
-	if (negative && !has_sha1_file(oid->hash))
+	if (negative && !has_sha1_file(sha1))
 		return;
 
 	if (negative)
 		putc('^', fh);
-	fputs(oid_to_hex(oid), fh);
+	fputs(sha1_to_hex(sha1), fh);
 	putc('\n', fh);
 }
 
@@ -58,25 +58,35 @@ static int pack_objects(int fd, struct ref *refs, struct oid_array *extra, struc
 	 * the revision parameters to it via its stdin and
 	 * let its stdout go back to the other end.
 	 */
+	const char *argv[] = {
+		"pack-objects",
+		"--all-progress-implied",
+		"--revs",
+		"--stdout",
+		NULL,
+		NULL,
+		NULL,
+		NULL,
+		NULL,
+		NULL,
+	};
 	struct child_process po = CHILD_PROCESS_INIT;
 	FILE *po_in;
 	int i;
 	int rc;
 
-	argv_array_push(&po.args, "pack-objects");
-	argv_array_push(&po.args, "--all-progress-implied");
-	argv_array_push(&po.args, "--revs");
-	argv_array_push(&po.args, "--stdout");
+	i = 4;
 	if (args->use_thin_pack)
-		argv_array_push(&po.args, "--thin");
+		argv[i++] = "--thin";
 	if (args->use_ofs_delta)
-		argv_array_push(&po.args, "--delta-base-offset");
+		argv[i++] = "--delta-base-offset";
 	if (args->quiet || !args->progress)
-		argv_array_push(&po.args, "-q");
+		argv[i++] = "-q";
 	if (args->progress)
-		argv_array_push(&po.args, "--progress");
+		argv[i++] = "--progress";
 	if (is_repository_shallow())
-		argv_array_push(&po.args, "--shallow");
+		argv[i++] = "--shallow";
+	po.argv = argv;
 	po.in = -1;
 	po.out = args->stateless_rpc ? -1 : fd;
 	po.git_cmd = 1;
@@ -89,13 +99,13 @@ static int pack_objects(int fd, struct ref *refs, struct oid_array *extra, struc
 	 */
 	po_in = xfdopen(po.in, "w");
 	for (i = 0; i < extra->nr; i++)
-		feed_object(&extra->oid[i], po_in, 1);
+		feed_object(extra->oid[i].hash, po_in, 1);
 
 	while (refs) {
 		if (!is_null_oid(&refs->old_oid))
-			feed_object(&refs->old_oid, po_in, 1);
+			feed_object(refs->old_oid.hash, po_in, 1);
 		if (!is_null_oid(&refs->new_oid))
-			feed_object(&refs->new_oid, po_in, 0);
+			feed_object(refs->new_oid.hash, po_in, 0);
 		refs = refs->next;
 	}
 
@@ -123,7 +133,7 @@ static int pack_objects(int fd, struct ref *refs, struct oid_array *extra, struc
 		 * For a normal non-zero exit, we assume pack-objects wrote
 		 * something useful to stderr. For death by signal, though,
 		 * we should mention it to the user. The exception is SIGPIPE
-		 * (141), because that's a normal occurrence if the remote end
+		 * (141), because that's a normal occurence if the remote end
 		 * hangs up (and we'll report that by trying to read the unpack
 		 * status).
 		 */
@@ -137,8 +147,6 @@ static int pack_objects(int fd, struct ref *refs, struct oid_array *extra, struc
 static int receive_unpack_status(int in)
 {
 	const char *line = packet_read_line(in, NULL);
-	if (!line)
-		return error(_("unexpected flush packet while reading remote unpack status"));
 	if (!skip_prefix(line, "unpack ", &line))
 		return error(_("unable to parse remote unpack status: %s"), line);
 	if (strcmp(line, "ok"))
@@ -484,12 +492,9 @@ int send_pack(struct send_pack_args *args,
 			 * we were to send it and we're trying to send the refs
 			 * atomically, abort the whole operation.
 			 */
-			if (use_atomic) {
-				strbuf_release(&req_buf);
-				strbuf_release(&cap_buf);
+			if (use_atomic)
 				return atomic_push_failure(args, remote_refs, ref);
-			}
-			/* else fallthrough */
+			/* Fallthrough for non atomic case. */
 		default:
 			continue;
 		}

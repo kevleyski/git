@@ -1,5 +1,4 @@
 #include "cache.h"
-#include "repository.h"
 #include "config.h"
 #include "lockfile.h"
 #include "refs.h"
@@ -18,7 +17,6 @@
 #include "prio-queue.h"
 #include "sha1-array.h"
 #include "oidset.h"
-#include "packfile.h"
 
 static int transfer_unpack_limit = -1;
 static int fetch_unpack_limit = -1;
@@ -30,7 +28,6 @@ static int deepen_not_ok;
 static int fetch_fsck_objects = -1;
 static int transfer_fsck_objects = -1;
 static int agent_supported;
-static int server_supports_filtering;
 static struct lock_file shallow_lock;
 static const char *alternate_shallow_file;
 
@@ -262,8 +259,8 @@ static enum ack_type get_ack(int fd, struct object_id *result_oid)
 	char *line = packet_read_line(fd, &len);
 	const char *arg;
 
-	if (!line)
-		die(_("git fetch-pack: expected ACK/NAK, got a flush packet"));
+	if (!len)
+		die(_("git fetch-pack: expected ACK/NAK, got EOF"));
 	if (!strcmp(line, "NAK"))
 		return NAK;
 	if (skip_prefix(line, "ACK ", &arg)) {
@@ -381,8 +378,6 @@ static int find_common(struct fetch_pack_args *args,
 			if (deepen_not_ok)      strbuf_addstr(&c, " deepen-not");
 			if (agent_supported)    strbuf_addf(&c, " agent=%s",
 							    git_user_agent_sanitized());
-			if (args->filter_options.choice)
-				strbuf_addstr(&c, " filter");
 			packet_buf_write(&req_buf, "want %s%s\n", remote_hex, c.buf);
 			strbuf_release(&c);
 		} else
@@ -411,9 +406,6 @@ static int find_common(struct fetch_pack_args *args,
 			packet_buf_write(&req_buf, "deepen-not %s", s->string);
 		}
 	}
-	if (server_supports_filtering && args->filter_options.choice)
-		packet_buf_write(&req_buf, "filter %s",
-				 args->filter_options.filter_spec);
 	packet_buf_flush(&req_buf);
 	state_len = req_buf.len;
 
@@ -457,8 +449,6 @@ static int find_common(struct fetch_pack_args *args,
 
 	flushes = 0;
 	retval = -1;
-	if (args->no_dependents)
-		goto done;
 	while ((oid = get_rev())) {
 		packet_buf_write(&req_buf, "have %s\n", oid_to_hex(oid));
 		print_verbose(args, "have %s", oid_to_hex(oid));
@@ -620,7 +610,7 @@ static int tip_oids_contain(struct oidset *tip_oids,
 	 * add to "newlist" between calls, the additions will always be for
 	 * oids that are already in the set.
 	 */
-	if (!tip_oids->map.map.tablesize) {
+	if (!tip_oids->map.tablesize) {
 		add_refs_to_oidset(tip_oids, unmatched);
 		add_refs_to_oidset(tip_oids, newlist);
 	}
@@ -712,61 +702,22 @@ static void mark_alternate_complete(struct object *obj)
 	mark_complete(&obj->oid);
 }
 
-struct loose_object_iter {
-	struct oidset *loose_object_set;
-	struct ref *refs;
-};
-
-/*
- *  If the number of refs is not larger than the number of loose objects,
- *  this function stops inserting.
- */
-static int add_loose_objects_to_set(const struct object_id *oid,
-				    const char *path,
-				    void *data)
-{
-	struct loose_object_iter *iter = data;
-	oidset_insert(iter->loose_object_set, oid);
-	if (iter->refs == NULL)
-		return 1;
-
-	iter->refs = iter->refs->next;
-	return 0;
-}
-
 static int everything_local(struct fetch_pack_args *args,
 			    struct ref **refs,
 			    struct ref **sought, int nr_sought)
 {
 	struct ref *ref;
 	int retval;
-	int old_save_commit_buffer = save_commit_buffer;
 	timestamp_t cutoff = 0;
-	struct oidset loose_oid_set = OIDSET_INIT;
-	int use_oidset = 0;
-	struct loose_object_iter iter = {&loose_oid_set, *refs};
-
-	/* Enumerate all loose objects or know refs are not so many. */
-	use_oidset = !for_each_loose_object(add_loose_objects_to_set,
-					    &iter, 0);
 
 	save_commit_buffer = 0;
 
 	for (ref = *refs; ref; ref = ref->next) {
 		struct object *o;
-		unsigned int flags = OBJECT_INFO_QUICK;
 
-		if (use_oidset &&
-		    !oidset_contains(&loose_oid_set, &ref->old_oid)) {
-			/*
-			 * I know this does not exist in the loose form,
-			 * so check if it exists in a non-loose form.
-			 */
-			flags |= OBJECT_INFO_IGNORE_LOOSE;
-		}
-
-		if (!has_object_file_with_flags(&ref->old_oid, flags))
+		if (!has_object_file(&ref->old_oid))
 			continue;
+
 		o = parse_object(&ref->old_oid);
 		if (!o)
 			continue;
@@ -782,33 +733,29 @@ static int everything_local(struct fetch_pack_args *args,
 		}
 	}
 
-	oidset_clear(&loose_oid_set);
+	if (!args->deepen) {
+		for_each_ref(mark_complete_oid, NULL);
+		for_each_cached_alternate(mark_alternate_complete);
+		commit_list_sort_by_date(&complete);
+		if (cutoff)
+			mark_recent_complete_commits(args, cutoff);
+	}
 
-	if (!args->no_dependents) {
-		if (!args->deepen) {
-			for_each_ref(mark_complete_oid, NULL);
-			for_each_cached_alternate(mark_alternate_complete);
-			commit_list_sort_by_date(&complete);
-			if (cutoff)
-				mark_recent_complete_commits(args, cutoff);
-		}
+	/*
+	 * Mark all complete remote refs as common refs.
+	 * Don't mark them common yet; the server has to be told so first.
+	 */
+	for (ref = *refs; ref; ref = ref->next) {
+		struct object *o = deref_tag(lookup_object(ref->old_oid.hash),
+					     NULL, 0);
 
-		/*
-		 * Mark all complete remote refs as common refs.
-		 * Don't mark them common yet; the server has to be told so first.
-		 */
-		for (ref = *refs; ref; ref = ref->next) {
-			struct object *o = deref_tag(lookup_object(ref->old_oid.hash),
-						     NULL, 0);
+		if (!o || o->type != OBJ_COMMIT || !(o->flags & COMPLETE))
+			continue;
 
-			if (!o || o->type != OBJ_COMMIT || !(o->flags & COMPLETE))
-				continue;
+		if (!(o->flags & SEEN)) {
+			rev_list_push((struct commit *)o, COMMON_REF | SEEN);
 
-			if (!(o->flags & SEEN)) {
-				rev_list_push((struct commit *)o, COMMON_REF | SEEN);
-
-				mark_common((struct commit *)o, 1, 1);
-			}
+			mark_common((struct commit *)o, 1, 1);
 		}
 	}
 
@@ -828,9 +775,6 @@ static int everything_local(struct fetch_pack_args *args,
 		print_verbose(args, _("already have %s (%s)"), oid_to_hex(remote),
 			      ref->name);
 	}
-
-	save_commit_buffer = old_save_commit_buffer;
-
 	return retval;
 }
 
@@ -887,7 +831,7 @@ static int get_pack(struct fetch_pack_args *args,
 		argv_array_push(&cmd.args, alternate_shallow_file);
 	}
 
-	if (do_keep || args->from_promisor) {
+	if (do_keep) {
 		if (pack_lockfile)
 			cmd.out = -1;
 		cmd_name = "index-pack";
@@ -897,7 +841,7 @@ static int get_pack(struct fetch_pack_args *args,
 			argv_array_push(&cmd.args, "-v");
 		if (args->use_thin_pack)
 			argv_array_push(&cmd.args, "--fix-thin");
-		if (do_keep && (args->lock_pack || unpack_limit)) {
+		if (args->lock_pack || unpack_limit) {
 			char hostname[HOST_NAME_MAX + 1];
 			if (xgethostname(hostname, sizeof(hostname)))
 				xsnprintf(hostname, sizeof(hostname), "localhost");
@@ -907,8 +851,6 @@ static int get_pack(struct fetch_pack_args *args,
 		}
 		if (args->check_self_contained_and_connected)
 			argv_array_push(&cmd.args, "--check-self-contained-and-connected");
-		if (args->from_promisor)
-			argv_array_push(&cmd.args, "--promisor");
 	}
 	else {
 		cmd_name = "unpack-objects";
@@ -926,17 +868,8 @@ static int get_pack(struct fetch_pack_args *args,
 	    ? fetch_fsck_objects
 	    : transfer_fsck_objects >= 0
 	    ? transfer_fsck_objects
-	    : 0) {
-		if (args->from_promisor)
-			/*
-			 * We cannot use --strict in index-pack because it
-			 * checks both broken objects and links, but we only
-			 * want to check for broken objects.
-			 */
-			argv_array_push(&cmd.args, "--fsck-objects");
-		else
-			argv_array_push(&cmd.args, "--strict");
-	}
+	    : 0)
+		argv_array_push(&cmd.args, "--strict");
 
 	cmd.in = demux.out;
 	cmd.git_cmd = 1;
@@ -1028,13 +961,6 @@ static struct ref *do_fetch_pack(struct fetch_pack_args *args,
 		print_verbose(args, _("Server supports ofs-delta"));
 	else
 		prefer_ofs_delta = 0;
-
-	if (server_supports("filter")) {
-		server_supports_filtering = 1;
-		print_verbose(args, _("Server supports filter"));
-	} else if (args->filter_options.choice) {
-		warning("filtering not recognized by server, ignoring");
-	}
 
 	if ((agent_feature = server_feature_value("agent", &agent_len))) {
 		agent_supported = 1;
@@ -1241,7 +1167,7 @@ struct ref *fetch_pack(struct fetch_pack_args *args,
 	prepare_shallow_info(&si, shallow);
 	ref_cpy = do_fetch_pack(args, fd, ref, sought, nr_sought,
 				&si, pack_lockfile);
-	reprepare_packed_git(the_repository);
+	reprepare_packed_git();
 	update_shallow(args, sought, nr_sought, &si);
 	clear_shallow_info(&si);
 	return ref_cpy;

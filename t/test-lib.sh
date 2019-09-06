@@ -36,19 +36,6 @@ then
 fi
 GIT_BUILD_DIR="$TEST_DIRECTORY"/..
 
-# If we were built with ASAN, it may complain about leaks
-# of program-lifetime variables. Disable it by default to lower
-# the noise level. This needs to happen at the start of the script,
-# before we even do our "did we build git yet" check (since we don't
-# want that one to complain to stderr).
-: ${ASAN_OPTIONS=detect_leaks=0:abort_on_error=1}
-export ASAN_OPTIONS
-
-# If LSAN is in effect we _do_ want leak checking, but we still
-# want to abort so that we notice the problems.
-: ${LSAN_OPTIONS=abort_on_error=1}
-export LSAN_OPTIONS
-
 ################################################################
 # It appears that people try to run tests without building...
 "$GIT_BUILD_DIR/git" >/dev/null
@@ -80,7 +67,7 @@ done,*)
 	# from any previous runs.
 	>"$GIT_TEST_TEE_OUTPUT_FILE"
 
-	(GIT_TEST_TEE_STARTED=done ${TEST_SHELL_PATH} "$0" "$@" 2>&1;
+	(GIT_TEST_TEE_STARTED=done ${SHELL_PATH} "$0" "$@" 2>&1;
 	 echo $? >"$BASE.exit") | tee -a "$GIT_TEST_TEE_OUTPUT_FILE"
 	test "$(cat "$BASE.exit")" = 0
 	exit
@@ -104,6 +91,7 @@ unset VISUAL EMAIL LANGUAGE COLUMNS $("$PERL_PATH" -e '
 	my $ok = join("|", qw(
 		TRACE
 		DEBUG
+		USE_LOOKUP
 		TEST
 		.*_TEST
 		PROVE
@@ -116,7 +104,6 @@ unset VISUAL EMAIL LANGUAGE COLUMNS $("$PERL_PATH" -e '
 	my @vars = grep(/^GIT_/ && !/^GIT_($ok)/o, @env);
 	print join("\n", @vars);
 ')
-unset XDG_CACHE_HOME
 unset XDG_CONFIG_HOME
 unset GITPERLLIB
 GIT_AUTHOR_EMAIL=author@example.com
@@ -161,6 +148,9 @@ else
 	}
 fi
 
+: ${ASAN_OPTIONS=detect_leaks=0}
+export ASAN_OPTIONS
+
 # Protect ourselves from common misconfiguration to export
 # CDPATH into the environment
 unset CDPATH
@@ -176,10 +166,9 @@ esac
 
 # Convenience
 #
-# A regexp to match 5, 35 and 40 hexdigits
+# A regexp to match 5 and 40 hexdigits
 _x05='[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
-_x35="$_x05$_x05$_x05$_x05$_x05$_x05$_x05"
-_x40="$_x35$_x05"
+_x40="$_x05$_x05$_x05$_x05$_x05$_x05$_x05$_x05"
 
 # Zero SHA-1
 _z40=0000000000000000000000000000000000000000
@@ -195,7 +184,7 @@ LF='
 # when case-folding filenames
 u200c=$(printf '\342\200\214')
 
-export _x05 _x35 _x40 _z40 LF u200c EMPTY_TREE EMPTY_BLOB
+export _x05 _x40 _z40 LF u200c EMPTY_TREE EMPTY_BLOB
 
 # Each test should start with something like this, after copyright notices:
 #
@@ -264,24 +253,8 @@ do
 		GIT_TEST_CHAIN_LINT=0
 		shift ;;
 	-x)
-		# Some test scripts can't be reliably traced  with '-x',
-		# unless the test is run with a Bash version supporting
-		# BASH_XTRACEFD (introduced in Bash v4.1).  Check whether
-		# this test is marked as such, and ignore '-x' if it
-		# isn't executed with a suitable Bash version.
-		if test -z "$test_untraceable" || {
-		     test -n "$BASH_VERSION" && {
-		       test ${BASH_VERSINFO[0]} -gt 4 || {
-			 test ${BASH_VERSINFO[0]} -eq 4 &&
-			 test ${BASH_VERSINFO[1]} -ge 1
-		       }
-		     }
-		   }
-		then
-			trace=t
-		else
-			echo >&2 "warning: ignoring -x; '$0' is untraceable without BASH_XTRACEFD"
-		fi
+		trace=t
+		verbose=t
 		shift ;;
 	--verbose-log)
 		verbose_log=t
@@ -296,11 +269,6 @@ then
 	test -z "$valgrind" && valgrind=memcheck
 	test -z "$verbose" && verbose_only="$valgrind_only"
 elif test -n "$valgrind"
-then
-	test -z "$verbose_log" && verbose=t
-fi
-
-if test -n "$trace" && test -z "$verbose_log"
 then
 	verbose=t
 fi
@@ -608,9 +576,7 @@ maybe_setup_valgrind () {
 }
 
 want_trace () {
-	test "$trace" = t && {
-		test "$verbose" = t || test "$verbose_log" = t
-	}
+	test "$trace" = t && test "$verbose" = t
 }
 
 # This is a separate function because some tests use
@@ -625,40 +591,26 @@ test_eval_inner_ () {
 }
 
 test_eval_ () {
-	# If "-x" tracing is in effect, then we want to avoid polluting stderr
-	# with non-test commands. But once in "set -x" mode, we cannot prevent
+	# We run this block with stderr redirected to avoid extra cruft
+	# during a "-x" trace. Once in "set -x" mode, we cannot prevent
 	# the shell from printing the "set +x" to turn it off (nor the saving
 	# of $? before that). But we can make sure that the output goes to
 	# /dev/null.
 	#
-	# There are a few subtleties here:
-	#
-	#   - we have to redirect descriptor 4 in addition to 2, to cover
-	#     BASH_XTRACEFD
-	#
-	#   - the actual eval has to come before the redirection block (since
-	#     it needs to see descriptor 4 to set up its stderr)
-	#
-	#   - likewise, any error message we print must be outside the block to
-	#     access descriptor 4
-	#
-	#   - checking $? has to come immediately after the eval, but it must
-	#     be _inside_ the block to avoid polluting the "set -x" output
-	#
-
-	test_eval_inner_ "$@" </dev/null >&3 2>&4
+	# The test itself is run with stderr put back to &4 (so either to
+	# /dev/null, or to the original stderr if --verbose was used).
 	{
+		test_eval_inner_ "$@" </dev/null >&3 2>&4
 		test_eval_ret_=$?
 		if want_trace
 		then
 			set +x
+			if test "$test_eval_ret_" != 0
+			then
+				say_color error >&4 "error: last command exited with \$?=$test_eval_ret_"
+			fi
 		fi
-	} 2>/dev/null 4>&2
-
-	if test "$test_eval_ret_" != 0 && want_trace
-	then
-		say_color error >&4 "error: last command exited with \$?=$test_eval_ret_"
-	fi
+	} 2>/dev/null
 	return $test_eval_ret_
 }
 
@@ -957,16 +909,16 @@ then
 	fi
 fi
 
-GITPERLLIB="$GIT_BUILD_DIR"/perl/build/lib
+GITPERLLIB="$GIT_BUILD_DIR"/perl/blib/lib:"$GIT_BUILD_DIR"/perl/blib/arch/auto/Git
 export GITPERLLIB
 test -d "$GIT_BUILD_DIR"/templates/blt || {
 	error "You haven't built things yet, have you?"
 }
 
-if ! test -x "$GIT_BUILD_DIR"/t/helper/test-tool
+if ! test -x "$GIT_BUILD_DIR"/t/helper/test-chmtime
 then
-	echo >&2 'You need to build test-tool:'
-	echo >&2 'Run "make t/helper/test-tool" in the source (toplevel) directory'
+	echo >&2 'You need to build test-chmtime:'
+	echo >&2 'Run "make t/helper/test-chmtime" in the source (toplevel) directory'
 	exit 1
 fi
 
@@ -1034,6 +986,9 @@ case $uname_s in
 	find () {
 		/usr/bin/find "$@"
 	}
+	sum () {
+		md5sum "$@"
+	}
 	# git sees Windows-style pwd
 	pwd () {
 		builtin pwd -W
@@ -1066,8 +1021,6 @@ test -z "$NO_PERL" && test_set_prereq PERL
 test -z "$NO_PTHREADS" && test_set_prereq PTHREADS
 test -z "$NO_PYTHON" && test_set_prereq PYTHON
 test -n "$USE_LIBPCRE1$USE_LIBPCRE2" && test_set_prereq PCRE
-test -n "$USE_LIBPCRE1" && test_set_prereq LIBPCRE1
-test -n "$USE_LIBPCRE2" && test_set_prereq LIBPCRE2
 test -z "$NO_GETTEXT" && test_set_prereq GETTEXT
 
 # Can we rely on git's output in the C locale?
@@ -1080,10 +1033,42 @@ else
 	test_set_prereq C_LOCALE_OUTPUT
 fi
 
+# Use this instead of test_cmp to compare files that contain expected and
+# actual output from git commands that can be translated.  When running
+# under GETTEXT_POISON this pretends that the command produced expected
+# results.
+test_i18ncmp () {
+	test -n "$GETTEXT_POISON" || test_cmp "$@"
+}
+
+# Use this instead of "grep expected-string actual" to see if the
+# output from a git command that can be translated either contains an
+# expected string, or does not contain an unwanted one.  When running
+# under GETTEXT_POISON this pretends that the command produced expected
+# results.
+test_i18ngrep () {
+	if test -n "$GETTEXT_POISON"
+	then
+	    : # pretend success
+	elif test "x!" = "x$1"
+	then
+		shift
+		! grep "$@"
+	else
+		grep "$@"
+	fi
+}
+
 test_lazy_prereq PIPE '
 	# test whether the filesystem supports FIFOs
-	test_have_prereq !MINGW,!CYGWIN &&
-	rm -f testfifo && mkfifo testfifo
+	case $(uname -s) in
+	CYGWIN*|MINGW*)
+		false
+		;;
+	*)
+		rm -f testfifo && mkfifo testfifo
+		;;
+	esac
 '
 
 test_lazy_prereq SYMLINKS '
@@ -1122,10 +1107,6 @@ test_lazy_prereq AUTOIDENT '
 
 test_lazy_prereq EXPENSIVE '
 	test -n "$GIT_TEST_LONG"
-'
-
-test_lazy_prereq EXPENSIVE_ON_WINDOWS '
-	test_have_prereq EXPENSIVE || test_have_prereq !MINGW,!CYGWIN
 '
 
 test_lazy_prereq USR_BIN_TIME '
@@ -1183,19 +1164,7 @@ run_with_limited_cmdline () {
 	(ulimit -s 128 && "$@")
 }
 
-test_lazy_prereq CMDLINE_LIMIT '
-	test_have_prereq !MINGW,!CYGWIN &&
-	run_with_limited_cmdline true
-'
-
-run_with_limited_stack () {
-	(ulimit -s 128 && "$@")
-}
-
-test_lazy_prereq ULIMIT_STACK_SIZE '
-	test_have_prereq !MINGW,!CYGWIN &&
-	run_with_limited_stack true
-'
+test_lazy_prereq CMDLINE_LIMIT 'run_with_limited_cmdline true'
 
 build_option () {
 	git version --build-options |
@@ -1206,5 +1175,5 @@ test_lazy_prereq LONG_IS_64BIT '
 	test 8 -le "$(build_option sizeof-long)"
 '
 
-test_lazy_prereq TIME_IS_64BIT 'test-tool date is64bit'
-test_lazy_prereq TIME_T_IS_64BIT 'test-tool date time_t-is64bit'
+test_lazy_prereq TIME_IS_64BIT 'test-date is64bit'
+test_lazy_prereq TIME_T_IS_64BIT 'test-date time_t-is64bit'

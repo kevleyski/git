@@ -272,7 +272,8 @@ static int dowild(const uchar *p, const uchar *text, unsigned int flags)
 }
 
 /* Match the "pattern" against the "text" string. */
-int wildmatch(const char *pattern, const char *text, unsigned int flags)
+int wildmatch(const char *pattern, const char *text,
+	      unsigned int flags, struct wildopts *wo)
 {
 	return dowild((const uchar*)pattern, (const uchar*)text, flags);
 }

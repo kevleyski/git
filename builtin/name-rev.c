@@ -130,7 +130,7 @@ static int subpath_matches(const char *path, const char *filter)
 	const char *subpath = path;
 
 	while (subpath) {
-		if (!wildmatch(filter, subpath, 0))
+		if (!wildmatch(filter, subpath, 0, NULL))
 			return subpath - path;
 		subpath = strchr(subpath, '/');
 		if (subpath)
@@ -253,7 +253,7 @@ static int name_ref(const char *path, const struct object_id *oid, int flags, vo
 		struct commit *commit = (struct commit *)o;
 		int from_tag = starts_with(path, "refs/tags/");
 
-		if (taggerdate == TIME_MAX)
+		if (taggerdate == ULONG_MAX)
 			taggerdate = ((struct commit *)o)->date;
 		path = name_ref_abbrev(path, can_abbreviate_output);
 		name_rev(commit, xstrdup(path), taggerdate, 0, 0,
@@ -328,7 +328,7 @@ static void show_name(const struct object *obj,
 	else if (allow_undefined)
 		printf("undefined\n");
 	else if (always)
-		printf("%s\n", find_unique_abbrev(oid, DEFAULT_ABBREV));
+		printf("%s\n", find_unique_abbrev(oid->hash, DEFAULT_ABBREV));
 	else
 		die("cannot describe '%s'", oid_to_hex(oid));
 	strbuf_release(&buf);
@@ -494,6 +494,5 @@ int cmd_name_rev(int argc, const char **argv, const char *prefix)
 				  always, allow_undefined, data.name_only);
 	}
 
-	UNLEAK(revs);
 	return 0;
 }

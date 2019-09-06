@@ -14,7 +14,8 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 /*
@@ -103,7 +104,7 @@ static int keyring_get(struct credential *c)
 	items = secret_service_search_sync(service,
 					   SECRET_SCHEMA_COMPAT_NETWORK,
 					   attributes,
-					   SECRET_SEARCH_LOAD_SECRETS | SECRET_SEARCH_UNLOCK,
+					   SECRET_SEARCH_LOAD_SECRETS,
 					   NULL,
 					   &error);
 	g_hash_table_unref(attributes);

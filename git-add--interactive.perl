@@ -3,7 +3,7 @@
 use 5.008;
 use strict;
 use warnings;
-use Git qw(unquote_path);
+use Git;
 use Git::I18N;
 
 binmode(STDOUT, ":raw");
@@ -174,6 +174,47 @@ if (!defined $GIT_DIR) {
 }
 chomp($GIT_DIR);
 
+my %cquote_map = (
+ "b" => chr(8),
+ "t" => chr(9),
+ "n" => chr(10),
+ "v" => chr(11),
+ "f" => chr(12),
+ "r" => chr(13),
+ "\\" => "\\",
+ "\042" => "\042",
+);
+
+sub unquote_path {
+	local ($_) = @_;
+	my ($retval, $remainder);
+	if (!/^\042(.*)\042$/) {
+		return $_;
+	}
+	($_, $retval) = ($1, "");
+	while (/^([^\\]*)\\(.*)$/) {
+		$remainder = $2;
+		$retval .= $1;
+		for ($remainder) {
+			if (/^([0-3][0-7][0-7])(.*)$/) {
+				$retval .= chr(oct($1));
+				$_ = $2;
+				last;
+			}
+			if (/^([\\\042btnvfr])(.*)$/) {
+				$retval .= $cquote_map{$1};
+				$_ = $2;
+				last;
+			}
+			# This is malformed -- just return it as-is for now.
+			return $_[0];
+		}
+		$_ = $remainder;
+	}
+	$retval .= $_;
+	return $retval;
+}
+
 sub refresh {
 	my $fh;
 	open $fh, 'git update-index --refresh |'
@@ -262,7 +303,7 @@ sub list_modified {
 		}
 	}
 
-	for (run_cmd_pipe(qw(git diff-files --ignore-submodules=dirty --numstat --summary --raw --), @ARGV)) {
+	for (run_cmd_pipe(qw(git diff-files --numstat --summary --raw --), @ARGV)) {
 		if (($add, $del, $file) =
 		    /^([-\d]+)	([-\d]+)	(.*)/) {
 			$file = unquote_path($file);
@@ -677,7 +718,7 @@ sub add_untracked_cmd {
 sub run_git_apply {
 	my $cmd = shift;
 	my $fh;
-	open $fh, '| git ' . $cmd . " --allow-overlap";
+	open $fh, '| git ' . $cmd . " --recount --allow-overlap";
 	print $fh @_;
 	return close $fh;
 }
@@ -704,14 +745,6 @@ sub parse_diff {
 		@colored = run_cmd_pipe(@display_cmd);
 	}
 	my (@hunk) = { TEXT => [], DISPLAY => [], TYPE => 'header' };
-
-	if (@colored && @colored != @diff) {
-		print STDERR
-		  "fatal: mismatched output from interactive.diffFilter\n",
-		  "hint: Your filter must maintain a one-to-one correspondence\n",
-		  "hint: between its input and output lines.\n";
-		exit 1;
-	}
 
 	for (my $i = 0; $i < @diff; $i++) {
 		if ($diff[$i] =~ /^@@ /) {
@@ -759,15 +792,6 @@ sub parse_hunk_header {
 	return ($o_ofs, $o_cnt, $n_ofs, $n_cnt);
 }
 
-sub format_hunk_header {
-	my ($o_ofs, $o_cnt, $n_ofs, $n_cnt) = @_;
-	return ("@@ -$o_ofs" .
-		(($o_cnt != 1) ? ",$o_cnt" : '') .
-		" +$n_ofs" .
-		(($n_cnt != 1) ? ",$n_cnt" : '') .
-		" @@\n");
-}
-
 sub split_hunk {
 	my ($text, $display) = @_;
 	my @split = ();
@@ -801,11 +825,6 @@ sub split_hunk {
 		while (++$i < @$text) {
 			my $line = $text->[$i];
 			my $display = $display->[$i];
-			if ($line =~ /^\\/) {
-				push @{$this->{TEXT}}, $line;
-				push @{$this->{DISPLAY}}, $display;
-				next;
-			}
 			if ($line =~ /^ /) {
 				if ($this->{ADDDEL} &&
 				    !defined $next_hunk_start) {
@@ -860,7 +879,11 @@ sub split_hunk {
 		my $o_cnt = $hunk->{OCNT};
 		my $n_cnt = $hunk->{NCNT};
 
-		my $head = format_hunk_header($o_ofs, $o_cnt, $n_ofs, $n_cnt);
+		my $head = ("@@ -$o_ofs" .
+			    (($o_cnt != 1) ? ",$o_cnt" : '') .
+			    " +$n_ofs" .
+			    (($n_cnt != 1) ? ",$n_cnt" : '') .
+			    " @@\n");
 		my $display_head = $head;
 		unshift @{$hunk->{TEXT}}, $head;
 		if ($diff_use_color) {
@@ -904,9 +927,6 @@ sub merge_hunk {
 			$n_cnt++;
 			push @line, $line;
 			next;
-		} elsif ($line =~ /^\\/) {
-			push @line, $line;
-			next;
 		}
 
 		last if ($o1_ofs <= $ofs);
@@ -925,9 +945,6 @@ sub merge_hunk {
 			$n_cnt++;
 			push @line, $line;
 			next;
-		} elsif ($line =~ /^\\/) {
-			push @line, $line;
-			next;
 		}
 		$ofs++;
 		$o_cnt++;
@@ -936,7 +953,11 @@ sub merge_hunk {
 		}
 		push @line, $line;
 	}
-	my $head = format_hunk_header($o0_ofs, $o_cnt, $n0_ofs, $n_cnt);
+	my $head = ("@@ -$o0_ofs" .
+		    (($o_cnt != 1) ? ",$o_cnt" : '') .
+		    " +$n0_ofs" .
+		    (($n_cnt != 1) ? ",$n_cnt" : '') .
+		    " @@\n");
 	@{$prev->{TEXT}} = ($head, @line);
 }
 
@@ -945,35 +966,14 @@ sub coalesce_overlapping_hunks {
 	my @out = ();
 
 	my ($last_o_ctx, $last_was_dirty);
-	my $ofs_delta = 0;
 
-	for (@in) {
+	for (grep { $_->{USE} } @in) {
 		if ($_->{TYPE} ne 'hunk') {
 			push @out, $_;
 			next;
 		}
 		my $text = $_->{TEXT};
-		my ($o_ofs, $o_cnt, $n_ofs, $n_cnt) =
-						parse_hunk_header($text->[0]);
-		unless ($_->{USE}) {
-			$ofs_delta += $o_cnt - $n_cnt;
-			# If this hunk has been edited then subtract
-			# the delta that is due to the edit.
-			if ($_->{OFS_DELTA}) {
-				$ofs_delta -= $_->{OFS_DELTA};
-			}
-			next;
-		}
-		if ($ofs_delta) {
-			$n_ofs += $ofs_delta;
-			$_->{TEXT}->[0] = format_hunk_header($o_ofs, $o_cnt,
-							     $n_ofs, $n_cnt);
-		}
-		# If this hunk was edited then adjust the offset delta
-		# to reflect the edit.
-		if ($_->{OFS_DELTA}) {
-			$ofs_delta += $_->{OFS_DELTA};
-		}
+		my ($o_ofs) = parse_hunk_header($text->[0]);
 		if (defined $last_o_ctx &&
 		    $o_ofs <= $last_o_ctx &&
 		    !$_->{DIRTY} &&
@@ -1044,30 +1044,6 @@ marked for discarding."),
 "If the patch applies cleanly, the edited hunk will immediately be
 marked for applying."),
 );
-
-sub recount_edited_hunk {
-	local $_;
-	my ($oldtext, $newtext) = @_;
-	my ($o_cnt, $n_cnt) = (0, 0);
-	for (@{$newtext}[1..$#{$newtext}]) {
-		my $mode = substr($_, 0, 1);
-		if ($mode eq '-') {
-			$o_cnt++;
-		} elsif ($mode eq '+') {
-			$n_cnt++;
-		} elsif ($mode eq ' ') {
-			$o_cnt++;
-			$n_cnt++;
-		}
-	}
-	my ($o_ofs, undef, $n_ofs, undef) =
-					parse_hunk_header($newtext->[0]);
-	$newtext->[0] = format_hunk_header($o_ofs, $o_cnt, $n_ofs, $n_cnt);
-	my (undef, $orig_o_cnt, undef, $orig_n_cnt) =
-					parse_hunk_header($oldtext->[0]);
-	# Return the change in the number of lines inserted by this hunk
-	return $orig_o_cnt - $orig_n_cnt - $o_cnt + $n_cnt;
-}
 
 sub edit_hunk_manually {
 	my ($oldtext) = @_;
@@ -1167,32 +1143,25 @@ sub prompt_yesno {
 }
 
 sub edit_hunk_loop {
-	my ($head, $hunks, $ix) = @_;
-	my $hunk = $hunks->[$ix];
-	my $text = $hunk->{TEXT};
+	my ($head, $hunk, $ix) = @_;
+	my $text = $hunk->[$ix]->{TEXT};
 
 	while (1) {
-		my $newtext = edit_hunk_manually($text);
-		if (!defined $newtext) {
+		$text = edit_hunk_manually($text);
+		if (!defined $text) {
 			return undef;
 		}
 		my $newhunk = {
-			TEXT => $newtext,
-			TYPE => $hunk->{TYPE},
+			TEXT => $text,
+			TYPE => $hunk->[$ix]->{TYPE},
 			USE => 1,
 			DIRTY => 1,
 		};
-		$newhunk->{OFS_DELTA} = recount_edited_hunk($text, $newtext);
-		# If this hunk has already been edited then add the
-		# offset delta of the previous edit to get the real
-		# delta from the original unedited hunk.
-		$hunk->{OFS_DELTA} and
-				$newhunk->{OFS_DELTA} += $hunk->{OFS_DELTA};
 		if (diff_applies($head,
-				 @{$hunks}[0..$ix-1],
+				 @{$hunk}[0..$ix-1],
 				 $newhunk,
-				 @{$hunks}[$ix+1..$#{$hunks}])) {
-			$newhunk->{DISPLAY} = [color_diff(@{$newtext})];
+				 @{$hunk}[$ix+1..$#{$hunk}])) {
+			$newhunk->{DISPLAY} = [color_diff(@{$text})];
 			return $newhunk;
 		}
 		else {
@@ -1256,13 +1225,7 @@ d - do not apply this hunk or any of the later hunks in the file"),
 );
 
 sub help_patch_cmd {
-	local $_;
-	my $other = $_[0] . ",?";
-	print colored $help_color, __($help_patch_modes{$patch_mode}), "\n",
-		map { "$_\n" } grep {
-			my $c = quotemeta(substr($_, 0, 1));
-			$other =~ /,$c/
-		} split "\n", __ <<EOF ;
+	print colored $help_color, __($help_patch_modes{$patch_mode}), "\n", __ <<EOF ;
 g - select a hunk to go to
 / - search for a hunk matching the given regex
 j - leave this hunk undecided, see next undecided hunk
@@ -1380,39 +1343,39 @@ sub display_hunks {
 
 my %patch_update_prompt_modes = (
 	stage => {
-		mode => N__("Stage mode change [y,n,q,a,d%s,?]? "),
-		deletion => N__("Stage deletion [y,n,q,a,d%s,?]? "),
-		hunk => N__("Stage this hunk [y,n,q,a,d%s,?]? "),
+		mode => N__("Stage mode change [y,n,q,a,d,/%s,?]? "),
+		deletion => N__("Stage deletion [y,n,q,a,d,/%s,?]? "),
+		hunk => N__("Stage this hunk [y,n,q,a,d,/%s,?]? "),
 	},
 	stash => {
-		mode => N__("Stash mode change [y,n,q,a,d%s,?]? "),
-		deletion => N__("Stash deletion [y,n,q,a,d%s,?]? "),
-		hunk => N__("Stash this hunk [y,n,q,a,d%s,?]? "),
+		mode => N__("Stash mode change [y,n,q,a,d,/%s,?]? "),
+		deletion => N__("Stash deletion [y,n,q,a,d,/%s,?]? "),
+		hunk => N__("Stash this hunk [y,n,q,a,d,/%s,?]? "),
 	},
 	reset_head => {
-		mode => N__("Unstage mode change [y,n,q,a,d%s,?]? "),
-		deletion => N__("Unstage deletion [y,n,q,a,d%s,?]? "),
-		hunk => N__("Unstage this hunk [y,n,q,a,d%s,?]? "),
+		mode => N__("Unstage mode change [y,n,q,a,d,/%s,?]? "),
+		deletion => N__("Unstage deletion [y,n,q,a,d,/%s,?]? "),
+		hunk => N__("Unstage this hunk [y,n,q,a,d,/%s,?]? "),
 	},
 	reset_nothead => {
-		mode => N__("Apply mode change to index [y,n,q,a,d%s,?]? "),
-		deletion => N__("Apply deletion to index [y,n,q,a,d%s,?]? "),
-		hunk => N__("Apply this hunk to index [y,n,q,a,d%s,?]? "),
+		mode => N__("Apply mode change to index [y,n,q,a,d,/%s,?]? "),
+		deletion => N__("Apply deletion to index [y,n,q,a,d,/%s,?]? "),
+		hunk => N__("Apply this hunk to index [y,n,q,a,d,/%s,?]? "),
 	},
 	checkout_index => {
-		mode => N__("Discard mode change from worktree [y,n,q,a,d%s,?]? "),
-		deletion => N__("Discard deletion from worktree [y,n,q,a,d%s,?]? "),
-		hunk => N__("Discard this hunk from worktree [y,n,q,a,d%s,?]? "),
+		mode => N__("Discard mode change from worktree [y,n,q,a,d,/%s,?]? "),
+		deletion => N__("Discard deletion from worktree [y,n,q,a,d,/%s,?]? "),
+		hunk => N__("Discard this hunk from worktree [y,n,q,a,d,/%s,?]? "),
 	},
 	checkout_head => {
-		mode => N__("Discard mode change from index and worktree [y,n,q,a,d%s,?]? "),
-		deletion => N__("Discard deletion from index and worktree [y,n,q,a,d%s,?]? "),
-		hunk => N__("Discard this hunk from index and worktree [y,n,q,a,d%s,?]? "),
+		mode => N__("Discard mode change from index and worktree [y,n,q,a,d,/%s,?]? "),
+		deletion => N__("Discard deletion from index and worktree [y,n,q,a,d,/%s,?]? "),
+		hunk => N__("Discard this hunk from index and worktree [y,n,q,a,d,/%s,?]? "),
 	},
 	checkout_nothead => {
-		mode => N__("Apply mode change to index and worktree [y,n,q,a,d%s,?]? "),
-		deletion => N__("Apply deletion to index and worktree [y,n,q,a,d%s,?]? "),
-		hunk => N__("Apply this hunk to index and worktree [y,n,q,a,d%s,?]? "),
+		mode => N__("Apply mode change to index and worktree [y,n,q,a,d,/%s,?]? "),
+		deletion => N__("Apply deletion to index and worktree [y,n,q,a,d,/%s,?]? "),
+		hunk => N__("Apply this hunk to index and worktree [y,n,q,a,d,/%s,?]? "),
 	},
 );
 
@@ -1468,7 +1431,7 @@ sub patch_update_file {
 			$other .= ',J';
 		}
 		if ($num > 1) {
-			$other .= ',g,/';
+			$other .= ',g';
 		}
 		for ($i = 0; $i < $num; $i++) {
 			if (!defined $hunk[$i]{USE}) {
@@ -1509,12 +1472,8 @@ sub patch_update_file {
 				}
 				next;
 			}
-			elsif ($line =~ /^g(.*)/) {
+			elsif ($other =~ /g/ && $line =~ /^g(.*)/) {
 				my $response = $1;
-				unless ($other =~ /g/) {
-					error_msg __("No other hunks to goto\n");
-					next;
-				}
 				my $no = $ix > 10 ? $ix - 10 : 0;
 				while ($response eq '') {
 					$no = display_hunks(\@hunk, $no);
@@ -1560,11 +1519,7 @@ sub patch_update_file {
 			}
 			elsif ($line =~ m|^/(.*)|) {
 				my $regex = $1;
-				unless ($other =~ m|/|) {
-					error_msg __("No other hunks to search\n");
-					next;
-				}
-				if ($regex eq "") {
+				if ($1 eq "") {
 					print colored $prompt_color, __("search for regex? ");
 					$regex = <STDIN>;
 					if (defined $regex) {
@@ -1632,11 +1587,7 @@ sub patch_update_file {
 					next;
 				}
 			}
-			elsif ($line =~ /^s/) {
-				unless ($other =~ /s/) {
-					error_msg __("Sorry, cannot split this hunk\n");
-					next;
-				}
+			elsif ($other =~ /s/ && $line =~ /^s/) {
 				my @split = split_hunk($hunk[$ix]{TEXT}, $hunk[$ix]{DISPLAY});
 				if (1 < @split) {
 					print colored $header_color, sprintf(
@@ -1648,11 +1599,7 @@ sub patch_update_file {
 				$num = scalar @hunk;
 				next;
 			}
-			elsif ($line =~ /^e/) {
-				unless ($other =~ /e/) {
-					error_msg __("Sorry, cannot edit this hunk\n");
-					next;
-				}
+			elsif ($other =~ /e/ && $line =~ /^e/) {
 				my $newhunk = edit_hunk_loop($head, \@hunk, $ix);
 				if (defined $newhunk) {
 					splice @hunk, $ix, 1, $newhunk;

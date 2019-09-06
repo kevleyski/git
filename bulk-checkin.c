@@ -3,17 +3,15 @@
  */
 #include "cache.h"
 #include "bulk-checkin.h"
-#include "repository.h"
 #include "csum-file.h"
 #include "pack.h"
 #include "strbuf.h"
-#include "packfile.h"
 
 static struct bulk_checkin_state {
 	unsigned plugged:1;
 
 	char *pack_tmp_name;
-	struct hashfile *f;
+	struct sha1file *f;
 	off_t offset;
 	struct pack_idx_option pack_idx_opts;
 
@@ -36,9 +34,9 @@ static void finish_bulk_checkin(struct bulk_checkin_state *state)
 		unlink(state->pack_tmp_name);
 		goto clear_exit;
 	} else if (state->nr_written == 1) {
-		hashclose(state->f, oid.hash, CSUM_FSYNC);
+		sha1close(state->f, oid.hash, CSUM_FSYNC);
 	} else {
-		int fd = hashclose(state->f, oid.hash, 0);
+		int fd = sha1close(state->f, oid.hash, 0);
 		fixup_pack_header_footer(fd, oid.hash, state->pack_tmp_name,
 					 state->nr_written, oid.hash,
 					 state->offset);
@@ -58,20 +56,20 @@ clear_exit:
 
 	strbuf_release(&packname);
 	/* Make objects we just wrote available to ourselves */
-	reprepare_packed_git(the_repository);
+	reprepare_packed_git();
 }
 
-static int already_written(struct bulk_checkin_state *state, struct object_id *oid)
+static int already_written(struct bulk_checkin_state *state, unsigned char sha1[])
 {
 	int i;
 
 	/* The object may already exist in the repository */
-	if (has_sha1_file(oid->hash))
+	if (has_sha1_file(sha1))
 		return 1;
 
 	/* Might want to keep the list sorted */
 	for (i = 0; i < state->nr_written; i++)
-		if (!oidcmp(&state->written[i]->oid, oid))
+		if (!hashcmp(state->written[i]->oid.hash, sha1))
 			return 1;
 
 	/* This is a new object we need to keep */
@@ -94,7 +92,7 @@ static int already_written(struct bulk_checkin_state *state, struct object_id *o
  * with a new pack.
  */
 static int stream_to_pack(struct bulk_checkin_state *state,
-			  git_hash_ctx *ctx, off_t *already_hashed_to,
+			  git_SHA_CTX *ctx, off_t *already_hashed_to,
 			  int fd, size_t size, enum object_type type,
 			  const char *path, unsigned flags)
 {
@@ -116,10 +114,7 @@ static int stream_to_pack(struct bulk_checkin_state *state,
 
 		if (size && !s.avail_in) {
 			ssize_t rsize = size < sizeof(ibuf) ? size : sizeof(ibuf);
-			ssize_t read_result = read_in_full(fd, ibuf, rsize);
-			if (read_result < 0)
-				die_errno("failed to read from '%s'", path);
-			if (read_result != rsize)
+			if (read_in_full(fd, ibuf, rsize) != rsize)
 				die("failed to read %d bytes from '%s'",
 				    (int)rsize, path);
 			offset += rsize;
@@ -128,7 +123,7 @@ static int stream_to_pack(struct bulk_checkin_state *state,
 				if (rsize < hsize)
 					hsize = rsize;
 				if (hsize)
-					the_hash_algo->update_fn(ctx, ibuf, hsize);
+					git_SHA1_Update(ctx, ibuf, hsize);
 				*already_hashed_to = offset;
 			}
 			s.next_in = ibuf;
@@ -150,7 +145,7 @@ static int stream_to_pack(struct bulk_checkin_state *state,
 					return -1;
 				}
 
-				hashwrite(state->f, obuf, written);
+				sha1write(state->f, obuf, written);
 				state->offset += written;
 			}
 			s.next_out = obuf;
@@ -187,16 +182,16 @@ static void prepare_to_stream(struct bulk_checkin_state *state,
 }
 
 static int deflate_to_pack(struct bulk_checkin_state *state,
-			   struct object_id *result_oid,
+			   unsigned char result_sha1[],
 			   int fd, size_t size,
 			   enum object_type type, const char *path,
 			   unsigned flags)
 {
 	off_t seekback, already_hashed_to;
-	git_hash_ctx ctx;
+	git_SHA_CTX ctx;
 	unsigned char obuf[16384];
 	unsigned header_len;
-	struct hashfile_checkpoint checkpoint;
+	struct sha1file_checkpoint checkpoint;
 	struct pack_idx_entry *idx = NULL;
 
 	seekback = lseek(fd, 0, SEEK_CUR);
@@ -204,9 +199,9 @@ static int deflate_to_pack(struct bulk_checkin_state *state,
 		return error("cannot find the current offset");
 
 	header_len = xsnprintf((char *)obuf, sizeof(obuf), "%s %" PRIuMAX,
-			       type_name(type), (uintmax_t)size) + 1;
-	the_hash_algo->init_fn(&ctx);
-	the_hash_algo->update_fn(&ctx, obuf, header_len);
+			       typename(type), (uintmax_t)size) + 1;
+	git_SHA1_Init(&ctx);
+	git_SHA1_Update(&ctx, obuf, header_len);
 
 	/* Note: idx is non-NULL when we are writing */
 	if ((flags & HASH_WRITE_OBJECT) != 0)
@@ -217,7 +212,7 @@ static int deflate_to_pack(struct bulk_checkin_state *state,
 	while (1) {
 		prepare_to_stream(state, flags);
 		if (idx) {
-			hashfile_checkpoint(state->f, &checkpoint);
+			sha1file_checkpoint(state->f, &checkpoint);
 			idx->offset = state->offset;
 			crc32_begin(state->f);
 		}
@@ -231,23 +226,23 @@ static int deflate_to_pack(struct bulk_checkin_state *state,
 		 */
 		if (!idx)
 			die("BUG: should not happen");
-		hashfile_truncate(state->f, &checkpoint);
+		sha1file_truncate(state->f, &checkpoint);
 		state->offset = checkpoint.offset;
 		finish_bulk_checkin(state);
 		if (lseek(fd, seekback, SEEK_SET) == (off_t) -1)
 			return error("cannot seek back");
 	}
-	the_hash_algo->final_fn(result_oid->hash, &ctx);
+	git_SHA1_Final(result_sha1, &ctx);
 	if (!idx)
 		return 0;
 
 	idx->crc32 = crc32_end(state->f);
-	if (already_written(state, result_oid)) {
-		hashfile_truncate(state->f, &checkpoint);
+	if (already_written(state, result_sha1)) {
+		sha1file_truncate(state->f, &checkpoint);
 		state->offset = checkpoint.offset;
 		free(idx);
 	} else {
-		oidcpy(&idx->oid, result_oid);
+		hashcpy(idx->oid.hash, result_sha1);
 		ALLOC_GROW(state->written,
 			   state->nr_written + 1,
 			   state->alloc_written);
@@ -256,11 +251,11 @@ static int deflate_to_pack(struct bulk_checkin_state *state,
 	return 0;
 }
 
-int index_bulk_checkin(struct object_id *oid,
+int index_bulk_checkin(unsigned char *sha1,
 		       int fd, size_t size, enum object_type type,
 		       const char *path, unsigned flags)
 {
-	int status = deflate_to_pack(&state, oid, fd, size, type,
+	int status = deflate_to_pack(&state, sha1, fd, size, type,
 				     path, flags);
 	if (!state.plugged)
 		finish_bulk_checkin(&state);

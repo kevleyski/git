@@ -86,7 +86,7 @@ test_expect_success 'cherry-pick on stat-dirty working tree' '
 	(
 		cd copy &&
 		git checkout initial &&
-		test-tool chmtime +40 oops &&
+		test-chmtime +40 oops &&
 		git cherry-pick added
 	)
 '
@@ -141,7 +141,7 @@ test_expect_success 'cherry-pick "-" works with arguments' '
 	test_cmp expect actual
 '
 
-test_expect_failure 'cherry-pick works with dirty renamed file' '
+test_expect_success 'cherry-pick works with dirty renamed file' '
 	test_commit to-rename &&
 	git checkout -b unrelated &&
 	test_commit unrelated &&
@@ -150,10 +150,7 @@ test_expect_failure 'cherry-pick works with dirty renamed file' '
 	test_tick &&
 	git commit -m renamed &&
 	echo modified >renamed &&
-	test_must_fail git cherry-pick refs/heads/unrelated >out &&
-	test_i18ngrep "Refusing to lose dirty file at renamed" out &&
-	test $(git rev-parse :0:renamed) = $(git rev-parse HEAD^:to-rename.t) &&
-	grep -q "^modified$" renamed
+	git cherry-pick refs/heads/unrelated
 '
 
 test_done

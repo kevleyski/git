@@ -48,16 +48,16 @@ struct spanhash_top {
 
 static struct spanhash_top *spanhash_rehash(struct spanhash_top *orig)
 {
-	struct spanhash_top *new_spanhash;
+	struct spanhash_top *new;
 	int i;
 	int osz = 1 << orig->alloc_log2;
 	int sz = osz << 1;
 
-	new_spanhash = xmalloc(st_add(sizeof(*orig),
+	new = xmalloc(st_add(sizeof(*orig),
 			     st_mult(sizeof(struct spanhash), sz)));
-	new_spanhash->alloc_log2 = orig->alloc_log2 + 1;
-	new_spanhash->free = INITIAL_FREE(new_spanhash->alloc_log2);
-	memset(new_spanhash->data, 0, sizeof(struct spanhash) * sz);
+	new->alloc_log2 = orig->alloc_log2 + 1;
+	new->free = INITIAL_FREE(new->alloc_log2);
+	memset(new->data, 0, sizeof(struct spanhash) * sz);
 	for (i = 0; i < osz; i++) {
 		struct spanhash *o = &(orig->data[i]);
 		int bucket;
@@ -65,11 +65,11 @@ static struct spanhash_top *spanhash_rehash(struct spanhash_top *orig)
 			continue;
 		bucket = o->hashval & (sz - 1);
 		while (1) {
-			struct spanhash *h = &(new_spanhash->data[bucket++]);
+			struct spanhash *h = &(new->data[bucket++]);
 			if (!h->cnt) {
 				h->hashval = o->hashval;
 				h->cnt = o->cnt;
-				new_spanhash->free--;
+				new->free--;
 				break;
 			}
 			if (sz <= bucket)
@@ -77,7 +77,7 @@ static struct spanhash_top *spanhash_rehash(struct spanhash_top *orig)
 		}
 	}
 	free(orig);
-	return new_spanhash;
+	return new;
 }
 
 static struct spanhash_top *add_spanhash(struct spanhash_top *top,

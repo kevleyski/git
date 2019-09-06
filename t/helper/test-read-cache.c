@@ -1,7 +1,6 @@
-#include "test-tool.h"
 #include "cache.h"
 
-int cmd__read_cache(int argc, const char **argv)
+int cmd_main(int argc, const char **argv)
 {
 	int i, cnt = 1;
 	if (argc == 2)

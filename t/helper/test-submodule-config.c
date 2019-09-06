@@ -1,4 +1,3 @@
-#include "test-tool.h"
 #include "cache.h"
 #include "config.h"
 #include "submodule-config.h"
@@ -11,7 +10,12 @@ static void die_usage(int argc, const char **argv, const char *msg)
 	exit(1);
 }
 
-int cmd__submodule_config(int argc, const char **argv)
+static int git_test_config(const char *var, const char *value, void *cb)
+{
+	return parse_submodule_config_option(var, value);
+}
+
+int cmd_main(int argc, const char **argv)
 {
 	const char **arg = argv;
 	int my_argc = argc;
@@ -33,9 +37,11 @@ int cmd__submodule_config(int argc, const char **argv)
 		die_usage(argc, argv, "Wrong number of arguments.");
 
 	setup_git_directory();
+	gitmodules_config();
+	git_config(git_test_config, NULL);
 
 	while (*arg) {
-		struct object_id commit_oid;
+		unsigned char commit_sha1[20];
 		const struct submodule *submodule;
 		const char *commit;
 		const char *path_or_name;
@@ -44,14 +50,14 @@ int cmd__submodule_config(int argc, const char **argv)
 		path_or_name = arg[1];
 
 		if (commit[0] == '\0')
-			oidclr(&commit_oid);
-		else if (get_oid(commit, &commit_oid) < 0)
+			hashclr(commit_sha1);
+		else if (get_sha1(commit, commit_sha1) < 0)
 			die_usage(argc, argv, "Commit not found.");
 
 		if (lookup_name) {
-			submodule = submodule_from_name(&commit_oid, path_or_name);
+			submodule = submodule_from_name(commit_sha1, path_or_name);
 		} else
-			submodule = submodule_from_path(&commit_oid, path_or_name);
+			submodule = submodule_from_path(commit_sha1, path_or_name);
 		if (!submodule)
 			die_usage(argc, argv, "Submodule not found.");
 

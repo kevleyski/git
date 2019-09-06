@@ -8,7 +8,6 @@
  * published by the Free Software Foundation.
  */
 
-#include "test-tool.h"
 #include "cache.h"
 #include "commit.h"
 #include "diff.h"
@@ -46,7 +45,7 @@ static int run_revision_walk(void)
 	return got_revision;
 }
 
-int cmd__revision_walking(int argc, const char **argv)
+int cmd_main(int argc, const char **argv)
 {
 	if (argc < 2)
 		return 1;

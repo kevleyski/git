@@ -5,7 +5,6 @@
 #include "string-list.h"
 #include "color.h"
 #include "pathspec.h"
-#include "remote.h"
 
 struct worktree;
 
@@ -28,12 +27,6 @@ enum untracked_status_type {
 	SHOW_ALL_UNTRACKED_FILES
 };
 
-enum show_ignored_type {
-	SHOW_NO_IGNORED,
-	SHOW_TRADITIONAL_IGNORED,
-	SHOW_MATCHING_IGNORED,
-};
-
 /* from where does this commit originate */
 enum commit_whence {
 	FROM_COMMIT,     /* normal */
@@ -45,11 +38,10 @@ struct wt_status_change_data {
 	int worktree_status;
 	int index_status;
 	int stagemask;
+	int score;
 	int mode_head, mode_index, mode_worktree;
 	struct object_id oid_head, oid_index;
-	int rename_status;
-	int rename_score;
-	char *rename_source;
+	char *head_path;
 	unsigned dirty_submodule       : 2;
 	unsigned new_submodule_commits : 1;
 };
@@ -78,17 +70,15 @@ struct wt_status {
 	int display_comment_prefix;
 	int relative_paths;
 	int submodule_summary;
-	enum show_ignored_type show_ignored_mode;
+	int show_ignored_files;
 	enum untracked_status_type show_untracked_files;
 	const char *ignore_submodule_arg;
 	char color_palette[WT_STATUS_MAXSLOT][COLOR_MAXLEN];
 	unsigned colopts;
 	int null_termination;
-	int commit_template;
 	int show_branch;
 	int show_stash;
 	int hints;
-	enum ahead_behind_flags ahead_behind_flags;
 
 	enum wt_status_format status_format;
 	unsigned char sha1_commit[GIT_MAX_RAWSZ]; /* when not Initial */
@@ -118,9 +108,9 @@ struct wt_status_state {
 	char *branch;
 	char *onto;
 	char *detached_from;
-	struct object_id detached_oid;
-	struct object_id revert_head_oid;
-	struct object_id cherry_pick_head_oid;
+	unsigned char detached_sha1[20];
+	unsigned char revert_head_sha1[20];
+	unsigned char cherry_pick_head_sha1[20];
 };
 
 size_t wt_status_locate_end(const char *s, size_t len);

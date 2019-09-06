@@ -9,7 +9,7 @@ git-prune - Prune all unreachable objects from the object database
 SYNOPSIS
 --------
 [verse]
-'git prune' [-n] [-v] [--progress] [--expire <time>] [--] [<head>...]
+'git prune' [-n] [-v] [--expire <expire>] [--] [<head>...]
 
 DESCRIPTION
 -----------
@@ -42,14 +42,11 @@ OPTIONS
 --verbose::
 	Report all removed objects.
 
---progress::
-	Show progress.
+\--::
+	Do not interpret any more arguments as options.
 
 --expire <time>::
 	Only expire loose objects older than <time>.
-
-\--::
-	Do not interpret any more arguments as options.
 
 <head>...::
 	In addition to objects

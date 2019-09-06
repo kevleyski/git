@@ -7,22 +7,16 @@
 #include "tree-walk.h"
 #include "revision.h"
 #include "list-objects.h"
-#include "list-objects-filter.h"
-#include "list-objects-filter-options.h"
-#include "packfile.h"
 
 static void process_blob(struct rev_info *revs,
 			 struct blob *blob,
 			 show_object_fn show,
 			 struct strbuf *path,
 			 const char *name,
-			 void *cb_data,
-			 filter_object_fn filter_fn,
-			 void *filter_data)
+			 void *cb_data)
 {
 	struct object *obj = &blob->object;
 	size_t pathlen;
-	enum list_objects_filter_result r = LOFR_MARK_SEEN | LOFR_DO_SHOW;
 
 	if (!revs->blob_objects)
 		return;
@@ -30,31 +24,11 @@ static void process_blob(struct rev_info *revs,
 		die("bad blob object");
 	if (obj->flags & (UNINTERESTING | SEEN))
 		return;
-
-	/*
-	 * Pre-filter known-missing objects when explicitly requested.
-	 * Otherwise, a missing object error message may be reported
-	 * later (depending on other filtering criteria).
-	 *
-	 * Note that this "--exclude-promisor-objects" pre-filtering
-	 * may cause the actual filter to report an incomplete list
-	 * of missing objects.
-	 */
-	if (revs->exclude_promisor_objects &&
-	    !has_object_file(&obj->oid) &&
-	    is_promisor_object(&obj->oid))
-		return;
+	obj->flags |= SEEN;
 
 	pathlen = path->len;
 	strbuf_addstr(path, name);
-	if (filter_fn)
-		r = filter_fn(LOFS_BLOB, obj,
-			      path->buf, &path->buf[pathlen],
-			      filter_data);
-	if (r & LOFR_MARK_SEEN)
-		obj->flags |= SEEN;
-	if (r & LOFR_DO_SHOW)
-		show(obj, path->buf, cb_data);
+	show(obj, path->buf, cb_data);
 	strbuf_setlen(path, pathlen);
 }
 
@@ -95,9 +69,7 @@ static void process_tree(struct rev_info *revs,
 			 show_object_fn show,
 			 struct strbuf *base,
 			 const char *name,
-			 void *cb_data,
-			 filter_object_fn filter_fn,
-			 void *filter_data)
+			 void *cb_data)
 {
 	struct object *obj = &tree->object;
 	struct tree_desc desc;
@@ -105,9 +77,6 @@ static void process_tree(struct rev_info *revs,
 	enum interesting match = revs->diffopt.pathspec.nr == 0 ?
 		all_entries_interesting: entry_not_interesting;
 	int baselen = base->len;
-	enum list_objects_filter_result r = LOFR_MARK_SEEN | LOFR_DO_SHOW;
-	int gently = revs->ignore_missing_links ||
-		     revs->exclude_promisor_objects;
 
 	if (!revs->tree_objects)
 		return;
@@ -115,31 +84,15 @@ static void process_tree(struct rev_info *revs,
 		die("bad tree object");
 	if (obj->flags & (UNINTERESTING | SEEN))
 		return;
-	if (parse_tree_gently(tree, gently) < 0) {
+	if (parse_tree_gently(tree, revs->ignore_missing_links) < 0) {
 		if (revs->ignore_missing_links)
 			return;
-
-		/*
-		 * Pre-filter known-missing tree objects when explicitly
-		 * requested.  This may cause the actual filter to report
-		 * an incomplete list of missing objects.
-		 */
-		if (revs->exclude_promisor_objects &&
-		    is_promisor_object(&obj->oid))
-			return;
-
 		die("bad tree object %s", oid_to_hex(&obj->oid));
 	}
 
+	obj->flags |= SEEN;
 	strbuf_addstr(base, name);
-	if (filter_fn)
-		r = filter_fn(LOFS_BEGIN_TREE, obj,
-			      base->buf, &base->buf[baselen],
-			      filter_data);
-	if (r & LOFR_MARK_SEEN)
-		obj->flags |= SEEN;
-	if (r & LOFR_DO_SHOW)
-		show(obj, base->buf, cb_data);
+	show(obj, base->buf, cb_data);
 	if (base->len)
 		strbuf_addch(base, '/');
 
@@ -159,7 +112,7 @@ static void process_tree(struct rev_info *revs,
 			process_tree(revs,
 				     lookup_tree(entry.oid),
 				     show, base, entry.path,
-				     cb_data, filter_fn, filter_data);
+				     cb_data);
 		else if (S_ISGITLINK(entry.mode))
 			process_gitlink(revs, entry.oid->hash,
 					show, base, entry.path,
@@ -168,19 +121,8 @@ static void process_tree(struct rev_info *revs,
 			process_blob(revs,
 				     lookup_blob(entry.oid),
 				     show, base, entry.path,
-				     cb_data, filter_fn, filter_data);
+				     cb_data);
 	}
-
-	if (filter_fn) {
-		r = filter_fn(LOFS_END_TREE, obj,
-			      base->buf, &base->buf[baselen],
-			      filter_data);
-		if (r & LOFR_MARK_SEEN)
-			obj->flags |= SEEN;
-		if (r & LOFR_DO_SHOW)
-			show(obj, base->buf, cb_data);
-	}
-
 	strbuf_setlen(base, baselen);
 	free_tree_buffer(tree);
 }
@@ -241,17 +183,25 @@ static void add_pending_tree(struct rev_info *revs, struct tree *tree)
 	add_pending_object(revs, &tree->object, "");
 }
 
-static void traverse_trees_and_blobs(struct rev_info *revs,
-				     struct strbuf *base,
-				     show_object_fn show_object,
-				     void *show_data,
-				     filter_object_fn filter_fn,
-				     void *filter_data)
+void traverse_commit_list(struct rev_info *revs,
+			  show_commit_fn show_commit,
+			  show_object_fn show_object,
+			  void *data)
 {
 	int i;
+	struct commit *commit;
+	struct strbuf base;
 
-	assert(base->len == 0);
-
+	strbuf_init(&base, PATH_MAX);
+	while ((commit = get_revision(revs)) != NULL) {
+		/*
+		 * an uninteresting boundary commit may not have its tree
+		 * parsed yet, but we are not going to show them anyway
+		 */
+		if (commit->tree)
+			add_pending_tree(revs, commit->tree);
+		show_commit(commit, data);
+	}
 	for (i = 0; i < revs->pending.nr; i++) {
 		struct object_array_entry *pending = revs->pending.objects + i;
 		struct object *obj = pending->item;
@@ -261,89 +211,24 @@ static void traverse_trees_and_blobs(struct rev_info *revs,
 			continue;
 		if (obj->type == OBJ_TAG) {
 			obj->flags |= SEEN;
-			show_object(obj, name, show_data);
+			show_object(obj, name, data);
 			continue;
 		}
 		if (!path)
 			path = "";
 		if (obj->type == OBJ_TREE) {
 			process_tree(revs, (struct tree *)obj, show_object,
-				     base, path, show_data,
-				     filter_fn, filter_data);
+				     &base, path, data);
 			continue;
 		}
 		if (obj->type == OBJ_BLOB) {
 			process_blob(revs, (struct blob *)obj, show_object,
-				     base, path, show_data,
-				     filter_fn, filter_data);
+				     &base, path, data);
 			continue;
 		}
 		die("unknown pending object %s (%s)",
 		    oid_to_hex(&obj->oid), name);
 	}
 	object_array_clear(&revs->pending);
-}
-
-static void do_traverse(struct rev_info *revs,
-			show_commit_fn show_commit,
-			show_object_fn show_object,
-			void *show_data,
-			filter_object_fn filter_fn,
-			void *filter_data)
-{
-	struct commit *commit;
-	struct strbuf csp; /* callee's scratch pad */
-	strbuf_init(&csp, PATH_MAX);
-
-	while ((commit = get_revision(revs)) != NULL) {
-		/*
-		 * an uninteresting boundary commit may not have its tree
-		 * parsed yet, but we are not going to show them anyway
-		 */
-		if (commit->tree)
-			add_pending_tree(revs, commit->tree);
-		show_commit(commit, show_data);
-
-		if (revs->tree_blobs_in_commit_order)
-			/*
-			 * NEEDSWORK: Adding the tree and then flushing it here
-			 * needs a reallocation for each commit. Can we pass the
-			 * tree directory without allocation churn?
-			 */
-			traverse_trees_and_blobs(revs, &csp,
-						 show_object, show_data,
-						 filter_fn, filter_data);
-	}
-	traverse_trees_and_blobs(revs, &csp,
-				 show_object, show_data,
-				 filter_fn, filter_data);
-	strbuf_release(&csp);
-}
-
-void traverse_commit_list(struct rev_info *revs,
-			  show_commit_fn show_commit,
-			  show_object_fn show_object,
-			  void *show_data)
-{
-	do_traverse(revs, show_commit, show_object, show_data, NULL, NULL);
-}
-
-void traverse_commit_list_filtered(
-	struct list_objects_filter_options *filter_options,
-	struct rev_info *revs,
-	show_commit_fn show_commit,
-	show_object_fn show_object,
-	void *show_data,
-	struct oidset *omitted)
-{
-	filter_object_fn filter_fn = NULL;
-	filter_free_fn filter_free_fn = NULL;
-	void *filter_data = NULL;
-
-	filter_data = list_objects_filter__init(omitted, filter_options,
-						&filter_fn, &filter_free_fn);
-	do_traverse(revs, show_commit, show_object, show_data,
-		    filter_fn, filter_data);
-	if (filter_data && filter_free_fn)
-		filter_free_fn(filter_data);
+	strbuf_release(&base);
 }

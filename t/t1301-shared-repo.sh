@@ -19,6 +19,10 @@ test_expect_success 'shared = 0400 (faulty permission u-w)' '
 	)
 '
 
+modebits () {
+	ls -l "$1" | sed -e 's|^\(..........\).*|\1|'
+}
+
 for u in 002 022
 do
 	test_expect_success POSIXPERM "shared=1 does not clear bits preset by umask $u" '
@@ -84,7 +88,7 @@ do
 
 		rm -f .git/info/refs &&
 		git update-server-info &&
-		actual="$(test_modebits .git/info/refs)" &&
+		actual="$(modebits .git/info/refs)" &&
 		verbose test "x$actual" = "x-$y"
 
 	'
@@ -94,7 +98,7 @@ do
 
 		rm -f .git/info/refs &&
 		git update-server-info &&
-		actual="$(test_modebits .git/info/refs)" &&
+		actual="$(modebits .git/info/refs)" &&
 		verbose test "x$actual" = "x-$x"
 
 	'
@@ -107,7 +111,7 @@ test_expect_success POSIXPERM 'info/refs respects umask in unshared repo' '
 	umask 002 &&
 	git update-server-info &&
 	echo "-rw-rw-r--" >expect &&
-	test_modebits .git/info/refs >actual &&
+	modebits .git/info/refs >actual &&
 	test_cmp expect actual
 '
 
@@ -173,7 +177,7 @@ test_expect_success POSIXPERM 'remote init does not use config from cwd' '
 	umask 0022 &&
 	git init --bare child.git &&
 	echo "-rw-r--r--" >expect &&
-	test_modebits child.git/config >actual &&
+	modebits child.git/config >actual &&
 	test_cmp expect actual
 '
 
@@ -183,7 +187,7 @@ test_expect_success POSIXPERM 're-init respects core.sharedrepository (local)' '
 	echo whatever >templates/foo &&
 	git init --template=templates &&
 	echo "-rw-rw-rw-" >expect &&
-	test_modebits .git/foo >actual &&
+	modebits .git/foo >actual &&
 	test_cmp expect actual
 '
 
@@ -194,7 +198,7 @@ test_expect_success POSIXPERM 're-init respects core.sharedrepository (remote)' 
 	test_path_is_missing child.git/foo &&
 	git init --bare --template=../templates child.git &&
 	echo "-rw-rw-rw-" >expect &&
-	test_modebits child.git/foo >actual &&
+	modebits child.git/foo >actual &&
 	test_cmp expect actual
 '
 
@@ -205,7 +209,7 @@ test_expect_success POSIXPERM 'template can set core.sharedrepository' '
 	cp .git/config templates/config &&
 	git init --bare --template=../templates child.git &&
 	echo "-rw-rw-rw-" >expect &&
-	test_modebits child.git/HEAD >actual &&
+	modebits child.git/HEAD >actual &&
 	test_cmp expect actual
 '
 

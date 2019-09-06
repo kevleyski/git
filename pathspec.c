@@ -526,13 +526,17 @@ static void NORETURN unsupported_magic(const char *pattern,
 	    pattern, sb.buf);
 }
 
+/*
+ * Given command line arguments and a prefix, convert the input to
+ * pathspec. die() if any magic in magic_mask is used.
+ */
 void parse_pathspec(struct pathspec *pathspec,
 		    unsigned magic_mask, unsigned flags,
 		    const char *prefix, const char **argv)
 {
 	struct pathspec_item *item;
 	const char *entry = argv ? *argv : NULL;
-	int i, n, prefixlen, nr_exclude = 0;
+	int i, n, prefixlen, warn_empty_string, nr_exclude = 0;
 
 	memset(pathspec, 0, sizeof(*pathspec));
 
@@ -565,10 +569,13 @@ void parse_pathspec(struct pathspec *pathspec,
 	}
 
 	n = 0;
+	warn_empty_string = 1;
 	while (argv[n]) {
-		if (*argv[n] == '\0')
-			die("empty string is not a valid pathspec. "
-				  "please use . instead if you meant to match all paths");
+		if (*argv[n] == '\0' && warn_empty_string) {
+			warning(_("empty strings as pathspecs will be made invalid in upcoming releases. "
+				  "please use . instead if you meant to match all paths"));
+			warn_empty_string = 0;
+		}
 		n++;
 	}
 
@@ -599,7 +606,7 @@ void parse_pathspec(struct pathspec *pathspec,
 
 	/*
 	 * If everything is an exclude pattern, add one positive pattern
-	 * that matches everything. We allocated an extra one for this.
+	 * that matches everyting. We allocated an extra one for this.
 	 */
 	if (nr_exclude == n) {
 		int plen = (!(flags & PATHSPEC_PREFER_CWD)) ? 0 : prefixlen;

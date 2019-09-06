@@ -1,6 +1,4 @@
 #include "cache.h"
-#include "diff.h"
-#include "diffcore.h"
 #include "lockfile.h"
 #include "commit.h"
 #include "run-command.h"
@@ -15,37 +13,6 @@ static const char *merge_argument(struct commit *commit)
 		return oid_to_hex(&commit->object.oid);
 	else
 		return EMPTY_TREE_SHA1_HEX;
-}
-
-int index_has_changes(struct strbuf *sb)
-{
-	struct object_id head;
-	int i;
-
-	if (!get_oid_tree("HEAD", &head)) {
-		struct diff_options opt;
-
-		diff_setup(&opt);
-		opt.flags.exit_with_status = 1;
-		if (!sb)
-			opt.flags.quick = 1;
-		do_diff_cache(&head, &opt);
-		diffcore_std(&opt);
-		for (i = 0; sb && i < diff_queued_diff.nr; i++) {
-			if (i)
-				strbuf_addch(sb, ' ');
-			strbuf_addstr(sb, diff_queued_diff.queue[i]->two->path);
-		}
-		diff_flush(&opt);
-		return opt.flags.has_changes != 0;
-	} else {
-		for (i = 0; sb && i < active_nr; i++) {
-			if (i)
-				strbuf_addch(sb, ' ');
-			strbuf_addstr(sb, active_cache[i]->name);
-		}
-		return !!active_nr;
-	}
 }
 
 int try_merge_command(const char *strategy, size_t xopts_nr,
@@ -86,11 +53,11 @@ int checkout_fast_forward(const struct object_id *head,
 	struct tree_desc t[MAX_UNPACK_TREES];
 	int i, nr_trees = 0;
 	struct dir_struct dir;
-	struct lock_file lock_file = LOCK_INIT;
+	struct lock_file *lock_file = xcalloc(1, sizeof(struct lock_file));
 
 	refresh_cache(REFRESH_QUIET);
 
-	if (hold_locked_index(&lock_file, LOCK_REPORT_ON_ERROR) < 0)
+	if (hold_locked_index(lock_file, LOCK_REPORT_ON_ERROR) < 0)
 		return -1;
 
 	memset(&trees, 0, sizeof(trees));
@@ -113,24 +80,20 @@ int checkout_fast_forward(const struct object_id *head,
 	setup_unpack_trees_porcelain(&opts, "merge");
 
 	trees[nr_trees] = parse_tree_indirect(head);
-	if (!trees[nr_trees++]) {
-		rollback_lock_file(&lock_file);
+	if (!trees[nr_trees++])
 		return -1;
-	}
 	trees[nr_trees] = parse_tree_indirect(remote);
-	if (!trees[nr_trees++]) {
-		rollback_lock_file(&lock_file);
+	if (!trees[nr_trees++])
 		return -1;
-	}
 	for (i = 0; i < nr_trees; i++) {
 		parse_tree(trees[i]);
 		init_tree_desc(t+i, trees[i]->buffer, trees[i]->size);
 	}
-	if (unpack_trees(nr_trees, t, &opts)) {
-		rollback_lock_file(&lock_file);
+	if (unpack_trees(nr_trees, t, &opts))
 		return -1;
-	}
-	if (write_locked_index(&the_index, &lock_file, COMMIT_LOCK))
+	if (write_locked_index(&the_index, lock_file, COMMIT_LOCK)) {
+		rollback_lock_file(lock_file);
 		return error(_("unable to write new index file"));
+	}
 	return 0;
 }

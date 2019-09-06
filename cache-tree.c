@@ -49,7 +49,7 @@ static int subtree_pos(struct cache_tree *it, const char *path, int pathlen)
 	lo = 0;
 	hi = it->subtree_nr;
 	while (lo < hi) {
-		int mi = lo + (hi - lo) / 2;
+		int mi = (lo + hi) / 2;
 		struct cache_tree_sub *mdl = down[mi];
 		int cmp = subtree_name_cmp(path, pathlen,
 					   mdl->name, mdl->namelen);
@@ -84,8 +84,9 @@ static struct cache_tree_sub *find_subtree(struct cache_tree *it,
 	down->namelen = pathlen;
 
 	if (pos < it->subtree_nr)
-		MOVE_ARRAY(it->down + pos + 1, it->down + pos,
-			   it->subtree_nr - pos - 1);
+		memmove(it->down + pos + 1,
+			it->down + pos,
+			sizeof(down) * (it->subtree_nr - pos - 1));
 	it->down[pos] = down;
 	return down;
 }
@@ -130,8 +131,9 @@ static int do_invalidate_path(struct cache_tree *it, const char *path)
 			 * move 4 and 5 up one place (2 entries)
 			 * 2 = 6 - 3 - 1 = subtree_nr - pos - 1
 			 */
-			MOVE_ARRAY(it->down + pos, it->down + pos + 1,
-				   it->subtree_nr - pos - 1);
+			memmove(it->down+pos, it->down+pos+1,
+				sizeof(struct cache_tree_sub *) *
+				(it->subtree_nr - pos - 1));
 			it->subtree_nr--;
 		}
 		return 1;
@@ -320,7 +322,7 @@ static int update_one(struct cache_tree *it,
 		struct cache_tree_sub *sub = NULL;
 		const char *path, *slash;
 		int pathlen, entlen;
-		const struct object_id *oid;
+		const unsigned char *sha1;
 		unsigned mode;
 		int expected_missing = 0;
 		int contains_ita = 0;
@@ -338,7 +340,7 @@ static int update_one(struct cache_tree *it,
 				die("cache-tree.c: '%.*s' in '%s' not found",
 				    entlen, path + baselen, path);
 			i += sub->count;
-			oid = &sub->cache_tree->oid;
+			sha1 = sub->cache_tree->oid.hash;
 			mode = S_IFDIR;
 			contains_ita = sub->cache_tree->entry_count < 0;
 			if (contains_ita) {
@@ -347,19 +349,19 @@ static int update_one(struct cache_tree *it,
 			}
 		}
 		else {
-			oid = &ce->oid;
+			sha1 = ce->oid.hash;
 			mode = ce->ce_mode;
 			entlen = pathlen - baselen;
 			i++;
 		}
 
-		if (is_null_oid(oid) ||
-		    (mode != S_IFGITLINK && !missing_ok && !has_object_file(oid))) {
+		if (is_null_sha1(sha1) ||
+		    (mode != S_IFGITLINK && !missing_ok && !has_sha1_file(sha1))) {
 			strbuf_release(&buffer);
 			if (expected_missing)
 				return -1;
 			return error("invalid object %06o %s for '%.*s'",
-				mode, oid_to_hex(oid), entlen+baselen, path);
+				mode, sha1_to_hex(sha1), entlen+baselen, path);
 		}
 
 		/*
@@ -385,12 +387,12 @@ static int update_one(struct cache_tree *it,
 		/*
 		 * "sub" can be an empty tree if all subentries are i-t-a.
 		 */
-		if (contains_ita && !oidcmp(oid, &empty_tree_oid))
+		if (contains_ita && !hashcmp(sha1, EMPTY_TREE_SHA1_BIN))
 			continue;
 
 		strbuf_grow(&buffer, entlen + 100);
 		strbuf_addf(&buffer, "%o %.*s%c", mode, entlen, path + baselen, '\0');
-		strbuf_add(&buffer, oid->hash, the_hash_algo->rawsz);
+		strbuf_add(&buffer, sha1, 20);
 
 #if DEBUG
 		fprintf(stderr, "cache-tree update-one %o %.*s\n",
@@ -399,16 +401,16 @@ static int update_one(struct cache_tree *it,
 	}
 
 	if (repair) {
-		struct object_id oid;
-		hash_object_file(buffer.buf, buffer.len, tree_type, &oid);
-		if (has_object_file(&oid))
-			oidcpy(&it->oid, &oid);
+		unsigned char sha1[20];
+		hash_sha1_file(buffer.buf, buffer.len, tree_type, sha1);
+		if (has_sha1_file(sha1))
+			hashcpy(it->oid.hash, sha1);
 		else
 			to_invalidate = 1;
-	} else if (dryrun) {
-		hash_object_file(buffer.buf, buffer.len, tree_type, &it->oid);
-	} else if (write_object_file(buffer.buf, buffer.len, tree_type,
-				     &it->oid)) {
+	} else if (dryrun)
+		hash_sha1_file(buffer.buf, buffer.len, tree_type,
+			       it->oid.hash);
+	else if (write_sha1_file(buffer.buf, buffer.len, tree_type, it->oid.hash)) {
 		strbuf_release(&buffer);
 		return -1;
 	}
@@ -465,7 +467,7 @@ static void write_one(struct strbuf *buffer, struct cache_tree *it,
 #endif
 
 	if (0 <= it->entry_count) {
-		strbuf_add(buffer, it->oid.hash, the_hash_algo->rawsz);
+		strbuf_add(buffer, it->oid.hash, 20);
 	}
 	for (i = 0; i < it->subtree_nr; i++) {
 		struct cache_tree_sub *down = it->down[i];
@@ -492,7 +494,6 @@ static struct cache_tree *read_one(const char **buffer, unsigned long *size_p)
 	char *ep;
 	struct cache_tree *it;
 	int i, subtree_nr;
-	const unsigned rawsz = the_hash_algo->rawsz;
 
 	it = NULL;
 	/* skip name, but make sure name exists */
@@ -521,11 +522,11 @@ static struct cache_tree *read_one(const char **buffer, unsigned long *size_p)
 		goto free_return;
 	buf++; size--;
 	if (0 <= it->entry_count) {
-		if (size < rawsz)
+		if (size < 20)
 			goto free_return;
-		memcpy(it->oid.hash, (const unsigned char*)buf, rawsz);
-		buf += rawsz;
-		size -= rawsz;
+		hashcpy(it->oid.hash, (const unsigned char*)buf);
+		buf += 20;
+		size -= 20;
 	}
 
 #if DEBUG
@@ -600,19 +601,22 @@ static struct cache_tree *cache_tree_find(struct cache_tree *it, const char *pat
 	return it;
 }
 
-int write_index_as_tree(struct object_id *oid, struct index_state *index_state, const char *index_path, int flags, const char *prefix)
+int write_index_as_tree(unsigned char *sha1, struct index_state *index_state, const char *index_path, int flags, const char *prefix)
 {
-	int entries, was_valid;
-	struct lock_file lock_file = LOCK_INIT;
-	int ret = 0;
+	int entries, was_valid, newfd;
+	struct lock_file *lock_file;
 
-	hold_lock_file_for_update(&lock_file, index_path, LOCK_DIE_ON_ERROR);
+	/*
+	 * We can't free this memory, it becomes part of a linked list
+	 * parsed atexit()
+	 */
+	lock_file = xcalloc(1, sizeof(struct lock_file));
 
-	entries = read_index_from(index_state, index_path, get_git_dir());
-	if (entries < 0) {
-		ret = WRITE_TREE_UNREADABLE_INDEX;
-		goto out;
-	}
+	newfd = hold_lock_file_for_update(lock_file, index_path, LOCK_DIE_ON_ERROR);
+
+	entries = read_index_from(index_state, index_path);
+	if (entries < 0)
+		return WRITE_TREE_UNREADABLE_INDEX;
 	if (flags & WRITE_TREE_IGNORE_CACHE_TREE)
 		cache_tree_free(&index_state->cache_tree);
 
@@ -621,11 +625,12 @@ int write_index_as_tree(struct object_id *oid, struct index_state *index_state, 
 
 	was_valid = cache_tree_fully_valid(index_state->cache_tree);
 	if (!was_valid) {
-		if (cache_tree_update(index_state, flags) < 0) {
-			ret = WRITE_TREE_UNMERGED_INDEX;
-			goto out;
+		if (cache_tree_update(index_state, flags) < 0)
+			return WRITE_TREE_UNMERGED_INDEX;
+		if (0 <= newfd) {
+			if (!write_locked_index(index_state, lock_file, COMMIT_LOCK))
+				newfd = -1;
 		}
-		write_locked_index(index_state, &lock_file, COMMIT_LOCK);
 		/* Not being able to write is fine -- we are only interested
 		 * in updating the cache-tree part, and if the next caller
 		 * ends up using the old index with unupdated cache-tree part
@@ -637,23 +642,22 @@ int write_index_as_tree(struct object_id *oid, struct index_state *index_state, 
 	if (prefix) {
 		struct cache_tree *subtree;
 		subtree = cache_tree_find(index_state->cache_tree, prefix);
-		if (!subtree) {
-			ret = WRITE_TREE_PREFIX_ERROR;
-			goto out;
-		}
-		oidcpy(oid, &subtree->oid);
+		if (!subtree)
+			return WRITE_TREE_PREFIX_ERROR;
+		hashcpy(sha1, subtree->oid.hash);
 	}
 	else
-		oidcpy(oid, &index_state->cache_tree->oid);
+		hashcpy(sha1, index_state->cache_tree->oid.hash);
 
-out:
-	rollback_lock_file(&lock_file);
-	return ret;
+	if (0 <= newfd)
+		rollback_lock_file(lock_file);
+
+	return 0;
 }
 
-int write_cache_as_tree(struct object_id *oid, int flags, const char *prefix)
+int write_cache_as_tree(unsigned char *sha1, int flags, const char *prefix)
 {
-	return write_index_as_tree(oid, &the_index, get_index_file(), flags, prefix);
+	return write_index_as_tree(sha1, &the_index, get_index_file(), flags, prefix);
 }
 
 static void prime_cache_tree_rec(struct cache_tree *it, struct tree *tree)
