@@ -276,7 +276,7 @@ static int entry_is_binary(const char *path, const void *buffer, size_t size)
 #define STREAM_BUFFER_SIZE (1024 * 16)
 
 static int write_zip_entry(struct archiver_args *args,
-			   const struct object_id *oid,
+			   const unsigned char *sha1,
 			   const char *path, size_t pathlen,
 			   unsigned int mode)
 {
@@ -314,7 +314,7 @@ static int write_zip_entry(struct archiver_args *args,
 
 	if (pathlen > 0xffff) {
 		return error("path too long (%d chars, SHA1: %s): %s",
-				(int)pathlen, oid_to_hex(oid), path);
+				(int)pathlen, sha1_to_hex(sha1), path);
 	}
 
 	if (S_ISDIR(mode) || S_ISGITLINK(mode)) {
@@ -325,7 +325,7 @@ static int write_zip_entry(struct archiver_args *args,
 		compressed_size = 0;
 		buffer = NULL;
 	} else if (S_ISREG(mode) || S_ISLNK(mode)) {
-		enum object_type type = oid_object_info(oid, &size);
+		enum object_type type = sha1_object_info(sha1, &size);
 
 		method = 0;
 		attr2 = S_ISLNK(mode) ? ((mode | 0777) << 16) :
@@ -337,18 +337,18 @@ static int write_zip_entry(struct archiver_args *args,
 
 		if (S_ISREG(mode) && type == OBJ_BLOB && !args->convert &&
 		    size > big_file_threshold) {
-			stream = open_istream(oid, &type, &size, NULL);
+			stream = open_istream(sha1, &type, &size, NULL);
 			if (!stream)
 				return error("cannot stream blob %s",
-					     oid_to_hex(oid));
+					     sha1_to_hex(sha1));
 			flags |= ZIP_STREAM;
 			out = buffer = NULL;
 		} else {
-			buffer = object_file_to_archive(args, path, oid, mode,
-							&type, &size);
+			buffer = sha1_file_to_archive(args, path, sha1, mode,
+						      &type, &size);
 			if (!buffer)
 				return error("cannot read %s",
-					     oid_to_hex(oid));
+					     sha1_to_hex(sha1));
 			crc = crc32(crc, buffer, size);
 			is_binary = entry_is_binary(path_without_prefix,
 						    buffer, size);
@@ -357,7 +357,7 @@ static int write_zip_entry(struct archiver_args *args,
 		compressed_size = (method == 0) ? size : 0;
 	} else {
 		return error("unsupported file mode: 0%o (SHA1: %s)", mode,
-				oid_to_hex(oid));
+				sha1_to_hex(sha1));
 	}
 
 	if (creator_version > max_creator_version)

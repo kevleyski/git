@@ -10,5 +10,9 @@
 #define WM_ABORT_ALL -1
 #define WM_ABORT_TO_STARSTAR -2
 
-int wildmatch(const char *pattern, const char *text, unsigned int flags);
+struct wildopts;
+
+int wildmatch(const char *pattern, const char *text,
+	      unsigned int flags,
+	      struct wildopts *wo);
 #endif

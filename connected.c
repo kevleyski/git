@@ -3,7 +3,6 @@
 #include "sigchain.h"
 #include "connected.h"
 #include "transport.h"
-#include "packfile.h"
 
 /*
  * If we feed all the commits we want to verify to this command
@@ -16,13 +15,13 @@
  *
  * Returns 0 if everything is connected, non-zero otherwise.
  */
-int check_connected(oid_iterate_fn fn, void *cb_data,
+int check_connected(sha1_iterate_fn fn, void *cb_data,
 		    struct check_connected_options *opt)
 {
 	struct child_process rev_list = CHILD_PROCESS_INIT;
 	struct check_connected_options defaults = CHECK_CONNECTED_INIT;
-	char commit[GIT_MAX_HEXSZ + 1];
-	struct object_id oid;
+	char commit[41];
+	unsigned char sha1[20];
 	int err = 0;
 	struct packed_git *new_pack = NULL;
 	struct transport *transport;
@@ -32,7 +31,7 @@ int check_connected(oid_iterate_fn fn, void *cb_data,
 		opt = &defaults;
 	transport = opt->transport;
 
-	if (fn(cb_data, &oid)) {
+	if (fn(cb_data, sha1)) {
 		if (opt->err_fd)
 			close(opt->err_fd);
 		return err;
@@ -56,8 +55,6 @@ int check_connected(oid_iterate_fn fn, void *cb_data,
 	argv_array_push(&rev_list.args,"rev-list");
 	argv_array_push(&rev_list.args, "--objects");
 	argv_array_push(&rev_list.args, "--stdin");
-	if (repository_format_partial_clone)
-		argv_array_push(&rev_list.args, "--exclude-promisor-objects");
 	argv_array_push(&rev_list.args, "--not");
 	argv_array_push(&rev_list.args, "--all");
 	argv_array_push(&rev_list.args, "--quiet");
@@ -79,7 +76,7 @@ int check_connected(oid_iterate_fn fn, void *cb_data,
 
 	sigchain_push(SIGPIPE, SIG_IGN);
 
-	commit[GIT_SHA1_HEXSZ] = '\n';
+	commit[40] = '\n';
 	do {
 		/*
 		 * If index-pack already checked that:
@@ -89,17 +86,17 @@ int check_connected(oid_iterate_fn fn, void *cb_data,
 		 * are sure the ref is good and not sending it to
 		 * rev-list for verification.
 		 */
-		if (new_pack && find_pack_entry_one(oid.hash, new_pack))
+		if (new_pack && find_pack_entry_one(sha1, new_pack))
 			continue;
 
-		memcpy(commit, oid_to_hex(&oid), GIT_SHA1_HEXSZ);
-		if (write_in_full(rev_list.in, commit, GIT_SHA1_HEXSZ + 1) < 0) {
+		memcpy(commit, sha1_to_hex(sha1), 40);
+		if (write_in_full(rev_list.in, commit, 41) < 0) {
 			if (errno != EPIPE && errno != EINVAL)
 				error_errno(_("failed write to rev-list"));
 			err = -1;
 			break;
 		}
-	} while (!fn(cb_data, &oid));
+	} while (!fn(cb_data, sha1));
 
 	if (close(rev_list.in))
 		err = error_errno(_("failed to close rev-list's stdin"));

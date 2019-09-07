@@ -57,7 +57,7 @@ static char *strip_escapes(const char *str, const char *service,
 				special = str[rpos];
 				if (rpos == 1)
 					break;
-				/* fallthrough */
+				/* Fall-through to error. */
 			default:
 				die("Bad remote-ext placeholder '%%%c'.",
 					str[rpos]);

@@ -44,7 +44,7 @@ static void stuff_change(struct diff_options *opt,
 	    !oidcmp(old_oid, new_oid) && (old_mode == new_mode))
 		return;
 
-	if (opt->flags.reverse_diff) {
+	if (DIFF_OPT_TST(opt, REVERSE_DIFF)) {
 		SWAP(old_mode, new_mode);
 		SWAP(old_oid, new_oid);
 		SWAP(old_path, new_path);
@@ -203,16 +203,17 @@ static int builtin_diff_combined(struct rev_info *revs,
 
 static void refresh_index_quietly(void)
 {
-	struct lock_file lock_file = LOCK_INIT;
+	struct lock_file *lock_file;
 	int fd;
 
-	fd = hold_locked_index(&lock_file, 0);
+	lock_file = xcalloc(1, sizeof(struct lock_file));
+	fd = hold_locked_index(lock_file, 0);
 	if (fd < 0)
 		return;
 	discard_cache();
 	read_cache();
 	refresh_cache(REFRESH_QUIET|REFRESH_UNMERGED);
-	update_index_if_able(&the_index, &lock_file);
+	update_index_if_able(&the_index, lock_file);
 }
 
 static int builtin_diff_files(struct rev_info *revs, int argc, const char **argv)
@@ -314,6 +315,8 @@ int cmd_diff(int argc, const char **argv, const char *prefix)
 			no_index = DIFF_NO_INDEX_IMPLICIT;
 	}
 
+	if (!no_index)
+		gitmodules_config();
 	init_diff_ui_defaults();
 	git_config(git_diff_ui_config, NULL);
 	precompose_argv(argc, argv);
@@ -349,8 +352,8 @@ int cmd_diff(int argc, const char **argv, const char *prefix)
 	rev.diffopt.stat_graph_width = -1;
 
 	/* Default to let external and textconv be used */
-	rev.diffopt.flags.allow_external = 1;
-	rev.diffopt.flags.allow_textconv = 1;
+	DIFF_OPT_SET(&rev.diffopt, ALLOW_EXTERNAL);
+	DIFF_OPT_SET(&rev.diffopt, ALLOW_TEXTCONV);
 
 	if (nongit)
 		die(_("Not a git repository"));
@@ -360,7 +363,7 @@ int cmd_diff(int argc, const char **argv, const char *prefix)
 		diff_setup_done(&rev.diffopt);
 	}
 
-	rev.diffopt.flags.recursive = 1;
+	DIFF_OPT_SET(&rev.diffopt, RECURSIVE);
 
 	setup_diff_pager(&rev.diffopt);
 
@@ -379,7 +382,7 @@ int cmd_diff(int argc, const char **argv, const char *prefix)
 				add_head_to_pending(&rev);
 				if (!rev.pending.nr) {
 					struct tree *tree;
-					tree = lookup_tree(the_hash_algo->empty_tree);
+					tree = lookup_tree(&empty_tree_oid);
 					add_pending_object(&rev, &tree->object, "HEAD");
 				}
 				break;
@@ -463,8 +466,5 @@ int cmd_diff(int argc, const char **argv, const char *prefix)
 	result = diff_result_code(&rev.diffopt, result);
 	if (1 < rev.diffopt.skip_stat_unmatch)
 		refresh_index_quietly();
-	UNLEAK(rev);
-	UNLEAK(ent);
-	UNLEAK(blob);
 	return result;
 }

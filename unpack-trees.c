@@ -1,6 +1,5 @@
 #define NO_THE_INDEX_COMPATIBILITY_MACROS
 #include "cache.h"
-#include "repository.h"
 #include "config.h"
 #include "dir.h"
 #include "tree.h"
@@ -14,8 +13,6 @@
 #include "dir.h"
 #include "submodule.h"
 #include "submodule-config.h"
-#include "fsmonitor.h"
-#include "fetch-object.h"
 
 /*
  * Error messages expected by scripts out of plumbing commands such as
@@ -165,7 +162,7 @@ void setup_unpack_trees_porcelain(struct unpack_trees_options *opts,
 	msgs[ERROR_BIND_OVERLAP] = _("Entry '%s' overlaps with '%s'.  Cannot bind.");
 
 	msgs[ERROR_SPARSE_NOT_UPTODATE_FILE] =
-		_("Cannot update sparse checkout: the following entries are not up to date:\n%s");
+		_("Cannot update sparse checkout: the following entries are not up-to-date:\n%s");
 	msgs[ERROR_WOULD_LOSE_ORPHANED_OVERWRITTEN] =
 		_("The following working tree files would be overwritten by sparse checkout update:\n%s");
 	msgs[ERROR_WOULD_LOSE_ORPHANED_REMOVED] =
@@ -195,10 +192,10 @@ static int do_add_entry(struct unpack_trees_options *o, struct cache_entry *ce,
 static struct cache_entry *dup_entry(const struct cache_entry *ce)
 {
 	unsigned int size = ce_size(ce);
-	struct cache_entry *new_entry = xmalloc(size);
+	struct cache_entry *new = xmalloc(size);
 
-	memcpy(new_entry, ce, size);
-	return new_entry;
+	memcpy(new, ce, size);
+	return new;
 }
 
 static void add_entry(struct unpack_trees_options *o,
@@ -258,41 +255,47 @@ static int check_submodule_move_head(const struct cache_entry *ce,
 {
 	unsigned flags = SUBMODULE_MOVE_HEAD_DRY_RUN;
 	const struct submodule *sub = submodule_from_ce(ce);
-
 	if (!sub)
 		return 0;
 
 	if (o->reset)
 		flags |= SUBMODULE_MOVE_HEAD_FORCE;
 
-	if (submodule_move_head(ce->name, old_id, new_id, flags))
-		return o->gently ? -1 :
-				   add_rejected_path(o, ERROR_WOULD_LOSE_SUBMODULE, ce->name);
-	return 0;
+	switch (sub->update_strategy.type) {
+	case SM_UPDATE_UNSPECIFIED:
+	case SM_UPDATE_CHECKOUT:
+		if (submodule_move_head(ce->name, old_id, new_id, flags))
+			return o->gently ? -1 :
+				add_rejected_path(o, ERROR_WOULD_LOSE_SUBMODULE, ce->name);
+		return 0;
+	case SM_UPDATE_NONE:
+		return 0;
+	case SM_UPDATE_REBASE:
+	case SM_UPDATE_MERGE:
+	case SM_UPDATE_COMMAND:
+	default:
+		warning(_("submodule update strategy not supported for submodule '%s'"), ce->name);
+		return -1;
+	}
 }
 
-/*
- * Preform the loading of the repository's gitmodules file.  This function is
- * used by 'check_update()' to perform loading of the gitmodules file in two
- * differnt situations:
- * (1) before removing entries from the working tree if the gitmodules file has
- *     been marked for removal.  This situation is specified by 'state' == NULL.
- * (2) before checking out entries to the working tree if the gitmodules file
- *     has been marked for update.  This situation is specified by 'state' != NULL.
- */
-static void load_gitmodules_file(struct index_state *index,
-				 struct checkout *state)
+static void reload_gitmodules_file(struct index_state *index,
+				   struct checkout *state)
 {
-	int pos = index_name_pos(index, GITMODULES_FILE, strlen(GITMODULES_FILE));
-
-	if (pos >= 0) {
-		struct cache_entry *ce = index->cache[pos];
-		if (!state && ce->ce_flags & CE_WT_REMOVE) {
-			repo_read_gitmodules(the_repository);
-		} else if (state && (ce->ce_flags & CE_UPDATE)) {
-			submodule_free();
-			checkout_entry(ce, state, NULL);
-			repo_read_gitmodules(the_repository);
+	int i;
+	for (i = 0; i < index->cache_nr; i++) {
+		struct cache_entry *ce = index->cache[i];
+		if (ce->ce_flags & CE_UPDATE) {
+			int r = strcmp(ce->name, ".gitmodules");
+			if (r < 0)
+				continue;
+			else if (r == 0) {
+				submodule_free();
+				checkout_entry(ce, state, NULL);
+				gitmodules_config();
+				git_config(submodule_config, NULL);
+			} else
+				break;
 		}
 	}
 }
@@ -305,9 +308,19 @@ static void unlink_entry(const struct cache_entry *ce)
 {
 	const struct submodule *sub = submodule_from_ce(ce);
 	if (sub) {
-		/* state.force is set at the caller. */
-		submodule_move_head(ce->name, "HEAD", NULL,
-				    SUBMODULE_MOVE_HEAD_FORCE);
+		switch (sub->update_strategy.type) {
+		case SM_UPDATE_UNSPECIFIED:
+		case SM_UPDATE_CHECKOUT:
+		case SM_UPDATE_REBASE:
+		case SM_UPDATE_MERGE:
+			/* state.force is set at the caller. */
+			submodule_move_head(ce->name, "HEAD", NULL,
+					    SUBMODULE_MOVE_HEAD_FORCE);
+			break;
+		case SM_UPDATE_NONE:
+		case SM_UPDATE_COMMAND:
+			return; /* Do not touch the submodule. */
+		}
 	}
 	if (!check_leading_path(ce->name, ce_namelen(ce)))
 		return;
@@ -330,7 +343,8 @@ static struct progress *get_progress(struct unpack_trees_options *o)
 			total++;
 	}
 
-	return start_delayed_progress(_("Checking out files"), total);
+	return start_progress_delay(_("Checking out files"),
+				    total, 50, 1);
 }
 
 static int check_updates(struct unpack_trees_options *o)
@@ -351,10 +365,6 @@ static int check_updates(struct unpack_trees_options *o)
 
 	if (o->update)
 		git_attr_set_direction(GIT_ATTR_CHECKOUT, index);
-
-	if (should_update_submodules() && o->update && !o->dry_run)
-		load_gitmodules_file(index, NULL);
-
 	for (i = 0; i < index->cache_nr; i++) {
 		const struct cache_entry *ce = index->cache[i];
 
@@ -368,31 +378,8 @@ static int check_updates(struct unpack_trees_options *o)
 	remove_scheduled_dirs();
 
 	if (should_update_submodules() && o->update && !o->dry_run)
-		load_gitmodules_file(index, &state);
+		reload_gitmodules_file(index, &state);
 
-	enable_delayed_checkout(&state);
-	if (repository_format_partial_clone && o->update && !o->dry_run) {
-		/*
-		 * Prefetch the objects that are to be checked out in the loop
-		 * below.
-		 */
-		struct oid_array to_fetch = OID_ARRAY_INIT;
-		int fetch_if_missing_store = fetch_if_missing;
-		fetch_if_missing = 0;
-		for (i = 0; i < index->cache_nr; i++) {
-			struct cache_entry *ce = index->cache[i];
-			if ((ce->ce_flags & CE_UPDATE) &&
-			    !S_ISGITLINK(ce->ce_mode)) {
-				if (!has_object_file(&ce->oid))
-					oid_array_append(&to_fetch, &ce->oid);
-			}
-		}
-		if (to_fetch.nr)
-			fetch_objects(repository_format_partial_clone,
-				      &to_fetch);
-		fetch_if_missing = fetch_if_missing_store;
-		oid_array_clear(&to_fetch);
-	}
 	for (i = 0; i < index->cache_nr; i++) {
 		struct cache_entry *ce = index->cache[i];
 
@@ -408,7 +395,6 @@ static int check_updates(struct unpack_trees_options *o)
 		}
 	}
 	stop_progress(&progress);
-	errs |= finish_delayed_checkout(&state);
 	if (o->update)
 		git_attr_set_direction(GIT_ATTR_CHECKIN, NULL);
 	return errs != 0;
@@ -432,7 +418,6 @@ static int apply_sparse_checkout(struct index_state *istate,
 		ce->ce_flags &= ~CE_SKIP_WORKTREE;
 	if (was_skip_worktree != ce_skip_worktree(ce)) {
 		ce->ce_flags |= CE_UPDATE_IN_BASE;
-		mark_fsmonitor_invalid(istate, ce);
 		istate->cache_changed |= CE_ENTRY_CHANGED;
 	}
 
@@ -675,10 +660,10 @@ static int traverse_trees_recursive(int n, unsigned long dirmask,
 		else if (i > 1 && are_same_oid(&names[i], &names[i - 2]))
 			t[i] = t[i - 2];
 		else {
-			const struct object_id *oid = NULL;
+			const unsigned char *sha1 = NULL;
 			if (dirmask & 1)
-				oid = names[i].oid;
-			buf[nr_buf++] = fill_tree_descriptor(t + i, oid);
+				sha1 = names[i].oid->hash;
+			buf[nr_buf++] = fill_tree_descriptor(t+i, sha1);
 		}
 	}
 
@@ -1529,7 +1514,7 @@ static void invalidate_ce_path(const struct cache_entry *ce,
 	if (!ce)
 		return;
 	cache_tree_invalidate_path(o->src_index, ce->name);
-	untracked_cache_invalidate_path(o->src_index, ce->name, 1);
+	untracked_cache_invalidate_path(o->src_index, ce->name);
 }
 
 /*
@@ -1566,15 +1551,15 @@ static int verify_clean_subdirectory(const struct cache_entry *ce,
 	int cnt = 0;
 
 	if (S_ISGITLINK(ce->ce_mode)) {
-		struct object_id oid;
-		int sub_head = resolve_gitlink_ref(ce->name, "HEAD", &oid);
+		unsigned char sha1[20];
+		int sub_head = resolve_gitlink_ref(ce->name, "HEAD", sha1);
 		/*
 		 * If we are not going to update the submodule, then
 		 * we don't care.
 		 */
-		if (!sub_head && !oidcmp(&oid, &ce->oid))
+		if (!sub_head && !hashcmp(sha1, ce->oid.hash))
 			return 0;
-		return verify_clean_submodule(sub_head ? NULL : oid_to_hex(&oid),
+		return verify_clean_submodule(sub_head ? NULL : sha1_to_hex(sha1),
 					      ce, error_type, o);
 	}
 
@@ -2162,9 +2147,6 @@ int oneway_merge(const struct cache_entry * const *src,
 			    ie_match_stat(o->src_index, old, &st, CE_MATCH_IGNORE_VALID|CE_MATCH_IGNORE_SKIP_WORKTREE))
 				update |= CE_UPDATE;
 		}
-		if (o->update && S_ISGITLINK(old->ce_mode) &&
-		    should_update_submodules() && !verify_uptodate(old, o))
-			update |= CE_UPDATE;
 		add_entry(o, old, update, 0);
 		return 0;
 	}

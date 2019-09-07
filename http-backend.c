@@ -1,6 +1,5 @@
 #include "cache.h"
 #include "config.h"
-#include "repository.h"
 #include "refs.h"
 #include "pkt-line.h"
 #include "object.h"
@@ -10,8 +9,6 @@
 #include "string-list.h"
 #include "url.h"
 #include "argv-array.h"
-#include "packfile.h"
-#include "object-store.h"
 
 static const char content_type[] = "Content-Type";
 static const char content_length[] = "Content-Length";
@@ -360,7 +357,7 @@ static void inflate_request(const char *prog_name, int out, int buffer_input)
 				die("zlib error inflating request, result %d", ret);
 
 			n = stream.total_out - cnt;
-			if (write_in_full(out, out_buf, n) < 0)
+			if (write_in_full(out, out_buf, n) != n)
 				die("%s aborted reading request", prog_name);
 			cnt += n;
 
@@ -381,7 +378,7 @@ static void copy_request(const char *prog_name, int out)
 	ssize_t n = read_request(0, &buf);
 	if (n < 0)
 		die_errno("error reading request body");
-	if (write_in_full(out, buf, n) < 0)
+	if (write_in_full(out, buf, n) != n)
 		die("%s aborted reading request", prog_name);
 	close(out);
 	free(buf);
@@ -488,9 +485,10 @@ static int show_head_ref(const char *refname, const struct object_id *oid,
 	struct strbuf *buf = cb_data;
 
 	if (flag & REF_ISSYMREF) {
+		struct object_id unused;
 		const char *target = resolve_ref_unsafe(refname,
 							RESOLVE_REF_READING,
-							NULL, NULL);
+							unused.hash, NULL);
 
 		if (target)
 			strbuf_addf(buf, "ref: %s\n", strip_namespace(target));
@@ -519,13 +517,14 @@ static void get_info_packs(struct strbuf *hdr, char *arg)
 	size_t cnt = 0;
 
 	select_getanyfile(hdr);
-	for (p = get_packed_git(the_repository); p; p = p->next) {
+	prepare_packed_git();
+	for (p = packed_git; p; p = p->next) {
 		if (p->pack_local)
 			cnt++;
 	}
 
 	strbuf_grow(&buf, cnt * 53 + 2);
-	for (p = get_packed_git(the_repository); p; p = p->next) {
+	for (p = packed_git; p; p = p->next) {
 		if (p->pack_local)
 			strbuf_addf(&buf, "P %s\n", p->pack_name + objdirlen + 6);
 	}

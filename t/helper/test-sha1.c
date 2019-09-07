@@ -1,7 +1,6 @@
-#include "test-tool.h"
 #include "cache.h"
 
-int cmd__sha1(int ac, const char **av)
+int cmd_main(int ac, const char **av)
 {
 	git_SHA_CTX ctx;
 	unsigned char sha1[20];

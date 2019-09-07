@@ -1,4 +1,3 @@
-#include "test-tool.h"
 #include "cache.h"
 
 static int rc;
@@ -29,7 +28,7 @@ static int is_in(const char *s, int ch)
 #define LOWER "abcdefghijklmnopqrstuvwxyz"
 #define UPPER "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
-int cmd__ctype(int argc, const char **argv)
+int cmd_main(int argc, const char **argv)
 {
 	TEST_CLASS(isdigit, DIGIT);
 	TEST_CLASS(isspace, " \n\r\t");

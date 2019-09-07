@@ -39,20 +39,13 @@ fi
 no_changes () {
 	git diff-index --quiet --cached HEAD --ignore-submodules -- "$@" &&
 	git diff-files --quiet --ignore-submodules -- "$@" &&
-	(test -z "$untracked" || test -z "$(untracked_files "$@")")
+	(test -z "$untracked" || test -z "$(untracked_files)")
 }
 
 untracked_files () {
-	if test "$1" = "-z"
-	then
-		shift
-		z=-z
-	else
-		z=
-	fi
 	excl_opt=--exclude-standard
 	test "$untracked" = "all" && excl_opt=
-	git ls-files -o $z $excl_opt -- "$@"
+	git ls-files -o -z $excl_opt -- "$@"
 }
 
 clear_stash () {
@@ -75,12 +68,6 @@ create_stash () {
 		-m|--message)
 			shift
 			stash_msg=${1?"BUG: create_stash () -m requires an argument"}
-			;;
-		-m*)
-			stash_msg=${1#-m}
-			;;
-		--message=*)
-			stash_msg=${1#--message=}
 			;;
 		-u|--include-untracked)
 			shift
@@ -127,7 +114,7 @@ create_stash () {
 		# Untracked files are stored by themselves in a parentless commit, for
 		# ease of unpacking later.
 		u_commit=$(
-			untracked_files -z "$@" | (
+			untracked_files "$@" | (
 				GIT_INDEX_FILE="$TMPindex" &&
 				export GIT_INDEX_FILE &&
 				rm -f "$TMPindex" &&
@@ -199,12 +186,6 @@ store_stash () {
 			shift
 			stash_msg="$1"
 			;;
-		-m*)
-			stash_msg=${1#-m}
-			;;
-		--message=*)
-			stash_msg=${1#--message=}
-			;;
 		-q|--quiet)
 			quiet=t
 			;;
@@ -263,12 +244,6 @@ push_stash () {
 			test -z ${1+x} && usage
 			stash_msg=$1
 			;;
-		-m*)
-			stash_msg=${1#-m}
-			;;
-		--message=*)
-			stash_msg=${1#--message=}
-			;;
 		--help)
 			show_help
 			;;
@@ -278,7 +253,18 @@ push_stash () {
 			;;
 		-*)
 			option="$1"
-			eval_gettextln "error: unknown option for 'stash push': \$option"
+			# TRANSLATORS: $option is an invalid option, like
+			# `--blah-blah'. The 7 spaces at the beginning of the
+			# second line correspond to "error: ". So you should line
+			# up the second line with however many characters the
+			# translation of "error: " takes in your language. E.g. in
+			# English this is:
+			#
+			#    $ git stash save --blah-blah 2>&1 | head -n 2
+			#    error: unknown option for 'stash save': --blah-blah
+			#           To provide a message, use git stash save -- '--blah-blah'
+			eval_gettextln "error: unknown option for 'stash save': \$option
+       To provide a message, use git stash save -- '\$option'"
 			usage
 			;;
 		*)
@@ -314,21 +300,19 @@ push_stash () {
 
 	if test -z "$patch_mode"
 	then
-		test "$untracked" = "all" && CLEAN_X_OPTION=-x || CLEAN_X_OPTION=
-		if test -n "$untracked" && test $# = 0
-		then
-			git clean --force --quiet -d $CLEAN_X_OPTION
-		fi
-
 		if test $# != 0
 		then
-			test -z "$untracked" && UPDATE_OPTION="-u" || UPDATE_OPTION=
-			test "$untracked" = "all" && FORCE_OPTION="--force" || FORCE_OPTION=
-			git add $UPDATE_OPTION $FORCE_OPTION -- "$@"
-			git diff-index -p --cached --binary HEAD -- "$@" |
-			git apply --index -R
+			git reset -q -- "$@"
+			git ls-files -z --modified -- "$@" |
+			git checkout-index -z --force --stdin
+			git clean --force -q -d -- "$@"
 		else
 			git reset --hard -q
+		fi
+		test "$untracked" = "all" && CLEAN_X_OPTION=-x || CLEAN_X_OPTION=
+		if test -n "$untracked"
+		then
+			git clean --force --quiet -d $CLEAN_X_OPTION -- "$@"
 		fi
 
 		if test "$keep_index" = "t" && test -n "$i_tree"
@@ -589,7 +573,7 @@ apply_stash () {
 
 	if test -n "$u_tree"
 	then
-		GIT_INDEX_FILE="$TMPindex" git read-tree "$u_tree" &&
+		GIT_INDEX_FILE="$TMPindex" git-read-tree "$u_tree" &&
 		GIT_INDEX_FILE="$TMPindex" git checkout-index --all &&
 		rm -f "$TMPindex" ||
 		die "$(gettext "Could not restore untracked files from stash entry")"

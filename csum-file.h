@@ -4,11 +4,11 @@
 struct progress;
 
 /* A SHA1-protected file */
-struct hashfile {
+struct sha1file {
 	int fd;
 	int check_fd;
 	unsigned int offset;
-	git_hash_ctx ctx;
+	git_SHA_CTX ctx;
 	off_t total;
 	struct progress *tp;
 	const char *name;
@@ -18,36 +18,36 @@ struct hashfile {
 };
 
 /* Checkpoint */
-struct hashfile_checkpoint {
+struct sha1file_checkpoint {
 	off_t offset;
-	git_hash_ctx ctx;
+	git_SHA_CTX ctx;
 };
 
-extern void hashfile_checkpoint(struct hashfile *, struct hashfile_checkpoint *);
-extern int hashfile_truncate(struct hashfile *, struct hashfile_checkpoint *);
+extern void sha1file_checkpoint(struct sha1file *, struct sha1file_checkpoint *);
+extern int sha1file_truncate(struct sha1file *, struct sha1file_checkpoint *);
 
-/* hashclose flags */
+/* sha1close flags */
 #define CSUM_CLOSE	1
 #define CSUM_FSYNC	2
 
-extern struct hashfile *hashfd(int fd, const char *name);
-extern struct hashfile *hashfd_check(const char *name);
-extern struct hashfile *hashfd_throughput(int fd, const char *name, struct progress *tp);
-extern int hashclose(struct hashfile *, unsigned char *, unsigned int);
-extern void hashwrite(struct hashfile *, const void *, unsigned int);
-extern void hashflush(struct hashfile *f);
-extern void crc32_begin(struct hashfile *);
-extern uint32_t crc32_end(struct hashfile *);
+extern struct sha1file *sha1fd(int fd, const char *name);
+extern struct sha1file *sha1fd_check(const char *name);
+extern struct sha1file *sha1fd_throughput(int fd, const char *name, struct progress *tp);
+extern int sha1close(struct sha1file *, unsigned char *, unsigned int);
+extern void sha1write(struct sha1file *, const void *, unsigned int);
+extern void sha1flush(struct sha1file *f);
+extern void crc32_begin(struct sha1file *);
+extern uint32_t crc32_end(struct sha1file *);
 
-static inline void hashwrite_u8(struct hashfile *f, uint8_t data)
+static inline void sha1write_u8(struct sha1file *f, uint8_t data)
 {
-	hashwrite(f, &data, sizeof(data));
+	sha1write(f, &data, sizeof(data));
 }
 
-static inline void hashwrite_be32(struct hashfile *f, uint32_t data)
+static inline void sha1write_be32(struct sha1file *f, uint32_t data)
 {
 	data = htonl(data);
-	hashwrite(f, &data, sizeof(data));
+	sha1write(f, &data, sizeof(data));
 }
 
 #endif

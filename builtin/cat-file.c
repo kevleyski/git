@@ -12,7 +12,6 @@
 #include "streaming.h"
 #include "tree-walk.h"
 #include "sha1-array.h"
-#include "packfile.h"
 
 struct batch_options {
 	int enabled;
@@ -32,7 +31,7 @@ static int filter_object(const char *path, unsigned mode,
 {
 	enum object_type type;
 
-	*buf = read_object_file(oid, &type, size);
+	*buf = read_sha1_file(oid->hash, &type, size);
 	if (!*buf)
 		return error(_("cannot read object %s '%s'"),
 			     oid_to_hex(oid), path);
@@ -58,14 +57,14 @@ static int cat_one_file(int opt, const char *exp_type, const char *obj_name,
 	struct object_context obj_context;
 	struct object_info oi = OBJECT_INFO_INIT;
 	struct strbuf sb = STRBUF_INIT;
-	unsigned flags = OBJECT_INFO_LOOKUP_REPLACE;
+	unsigned flags = LOOKUP_REPLACE_OBJECT;
 	const char *path = force_path;
 
 	if (unknown_type)
-		flags |= OBJECT_INFO_ALLOW_UNKNOWN_TYPE;
+		flags |= LOOKUP_UNKNOWN_OBJECT;
 
-	if (get_oid_with_context(obj_name, GET_OID_RECORD_PATH,
-				 &oid, &obj_context))
+	if (get_sha1_with_context(obj_name, GET_SHA1_RECORD_PATH,
+				  oid.hash, &obj_context))
 		die("Not a valid object name %s", obj_name);
 
 	if (!path)
@@ -76,8 +75,8 @@ static int cat_one_file(int opt, const char *exp_type, const char *obj_name,
 	buf = NULL;
 	switch (opt) {
 	case 't':
-		oi.type_name = &sb;
-		if (oid_object_info_extended(&oid, &oi, flags) < 0)
+		oi.typename = &sb;
+		if (sha1_object_info_extended(oid.hash, &oi, flags) < 0)
 			die("git cat-file: could not get object info");
 		if (sb.len) {
 			printf("%s\n", sb.buf);
@@ -88,7 +87,7 @@ static int cat_one_file(int opt, const char *exp_type, const char *obj_name,
 
 	case 's':
 		oi.sizep = &size;
-		if (oid_object_info_extended(&oid, &oi, flags) < 0)
+		if (sha1_object_info_extended(oid.hash, &oi, flags) < 0)
 			die("git cat-file: could not get object info");
 		printf("%lu\n", size);
 		return 0;
@@ -97,7 +96,7 @@ static int cat_one_file(int opt, const char *exp_type, const char *obj_name,
 		return !has_object_file(&oid);
 
 	case 'w':
-		if (!path)
+		if (!path[0])
 			die("git cat-file --filters %s: <object> must be "
 			    "<sha1:path>", obj_name);
 
@@ -107,16 +106,15 @@ static int cat_one_file(int opt, const char *exp_type, const char *obj_name,
 		break;
 
 	case 'c':
-		if (!path)
+		if (!path[0])
 			die("git cat-file --textconv %s: <object> must be <sha1:path>",
 			    obj_name);
 
 		if (textconv_object(path, obj_context.mode, &oid, 1, &buf, &size))
 			break;
-		/* else fallthrough */
 
 	case 'p':
-		type = oid_object_info(&oid, NULL);
+		type = sha1_object_info(oid.hash, NULL);
 		if (type < 0)
 			die("Not a valid object name %s", obj_name);
 
@@ -130,7 +128,7 @@ static int cat_one_file(int opt, const char *exp_type, const char *obj_name,
 
 		if (type == OBJ_BLOB)
 			return stream_blob_to_fd(1, &oid, NULL, 0);
-		buf = read_object_file(&oid, &type, &size);
+		buf = read_sha1_file(oid.hash, &type, &size);
 		if (!buf)
 			die("Cannot read object %s", obj_name);
 
@@ -140,9 +138,8 @@ static int cat_one_file(int opt, const char *exp_type, const char *obj_name,
 	case 0:
 		if (type_from_string(exp_type) == OBJ_BLOB) {
 			struct object_id blob_oid;
-			if (oid_object_info(&oid, NULL) == OBJ_TAG) {
-				char *buffer = read_object_file(&oid, &type,
-								&size);
+			if (sha1_object_info(oid.hash, NULL) == OBJ_TAG) {
+				char *buffer = read_sha1_file(oid.hash, &type, &size);
 				const char *target;
 				if (!skip_prefix(buffer, "object ", &target) ||
 				    get_oid_hex(target, &blob_oid))
@@ -151,7 +148,7 @@ static int cat_one_file(int opt, const char *exp_type, const char *obj_name,
 			} else
 				oidcpy(&blob_oid, &oid);
 
-			if (oid_object_info(&blob_oid, NULL) == OBJ_BLOB)
+			if (sha1_object_info(blob_oid.hash, NULL) == OBJ_BLOB)
 				return stream_blob_to_fd(1, &blob_oid, NULL, 0);
 			/*
 			 * we attempted to dereference a tag to a blob
@@ -160,7 +157,7 @@ static int cat_one_file(int opt, const char *exp_type, const char *obj_name,
 			 * fall-back to the usual case.
 			 */
 		}
-		buf = read_object_with_reference(&oid, exp_type, &size, NULL);
+		buf = read_object_with_reference(oid.hash, exp_type, &size, NULL);
 		break;
 
 	default:
@@ -230,7 +227,7 @@ static void expand_atom(struct strbuf *sb, const char *atom, int len,
 		if (data->mark_query)
 			data->info.typep = &data->type;
 		else
-			strbuf_addstr(sb, type_name(data->type));
+			strbuf_addstr(sb, typename(data->type));
 	} else if (is_atom("objectsize", atom, len)) {
 		if (data->mark_query)
 			data->info.sizep = &data->size;
@@ -305,9 +302,8 @@ static void print_object_or_die(struct batch_options *opt, struct expand_data *d
 				enum object_type type;
 				if (!textconv_object(data->rest, 0100644, oid,
 						     1, &contents, &size))
-					contents = read_object_file(oid,
-								    &type,
-								    &size);
+					contents = read_sha1_file(oid->hash, &type,
+								  &size);
 				if (!contents)
 					die("could not convert '%s' %s",
 					    oid_to_hex(oid), data->rest);
@@ -323,7 +319,7 @@ static void print_object_or_die(struct batch_options *opt, struct expand_data *d
 		unsigned long size;
 		void *contents;
 
-		contents = read_object_file(oid, &type, &size);
+		contents = read_sha1_file(oid->hash, &type, &size);
 		if (!contents)
 			die("object %s disappeared", oid_to_hex(oid));
 		if (type != data->type)
@@ -342,8 +338,7 @@ static void batch_object_write(const char *obj_name, struct batch_options *opt,
 	struct strbuf buf = STRBUF_INIT;
 
 	if (!data->skip_object_info &&
-	    oid_object_info_extended(&data->oid, &data->info,
-				     OBJECT_INFO_LOOKUP_REPLACE) < 0) {
+	    sha1_object_info_extended(data->oid.hash, &data->info, LOOKUP_REPLACE_OBJECT) < 0) {
 		printf("%s missing\n",
 		       obj_name ? obj_name : oid_to_hex(&data->oid));
 		fflush(stdout);
@@ -365,10 +360,10 @@ static void batch_one_object(const char *obj_name, struct batch_options *opt,
 			     struct expand_data *data)
 {
 	struct object_context ctx;
-	int flags = opt->follow_symlinks ? GET_OID_FOLLOW_SYMLINKS : 0;
+	int flags = opt->follow_symlinks ? GET_SHA1_FOLLOW_SYMLINKS : 0;
 	enum follow_symlinks_result result;
 
-	result = get_oid_with_context(obj_name, flags, &data->oid, &ctx);
+	result = get_sha1_with_context(obj_name, flags, data->oid.hash, &ctx);
 	if (result != FOUND) {
 		switch (result) {
 		case MISSING_OBJECT:
@@ -477,8 +472,6 @@ static int batch_objects(struct batch_options *opt)
 
 		for_each_loose_object(batch_loose_object, &sa, 0);
 		for_each_packed_object(batch_packed_object, &sa, 0);
-		if (repository_format_partial_clone)
-			warning("This repository has extensions.partialClone set. Some objects may not be loaded.");
 
 		cb.opt = opt;
 		cb.expand = &data;

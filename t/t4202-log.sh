@@ -737,107 +737,6 @@ test_expect_success 'log.decorate configuration' '
 
 '
 
-test_expect_success 'decorate-refs with glob' '
-	cat >expect.decorate <<-\EOF &&
-	Merge-tag-reach
-	Merge-tags-octopus-a-and-octopus-b
-	seventh
-	octopus-b (octopus-b)
-	octopus-a (octopus-a)
-	reach
-	EOF
-	git log -n6 --decorate=short --pretty="tformat:%f%d" \
-		--decorate-refs="heads/octopus*" >actual &&
-	test_cmp expect.decorate actual
-'
-
-test_expect_success 'decorate-refs without globs' '
-	cat >expect.decorate <<-\EOF &&
-	Merge-tag-reach
-	Merge-tags-octopus-a-and-octopus-b
-	seventh
-	octopus-b
-	octopus-a
-	reach (tag: reach)
-	EOF
-	git log -n6 --decorate=short --pretty="tformat:%f%d" \
-		--decorate-refs="tags/reach" >actual &&
-	test_cmp expect.decorate actual
-'
-
-test_expect_success 'multiple decorate-refs' '
-	cat >expect.decorate <<-\EOF &&
-	Merge-tag-reach
-	Merge-tags-octopus-a-and-octopus-b
-	seventh
-	octopus-b (octopus-b)
-	octopus-a (octopus-a)
-	reach (tag: reach)
-	EOF
-	git log -n6 --decorate=short --pretty="tformat:%f%d" \
-		--decorate-refs="heads/octopus*" \
-		--decorate-refs="tags/reach" >actual &&
-    test_cmp expect.decorate actual
-'
-
-test_expect_success 'decorate-refs-exclude with glob' '
-	cat >expect.decorate <<-\EOF &&
-	Merge-tag-reach (HEAD -> master)
-	Merge-tags-octopus-a-and-octopus-b
-	seventh (tag: seventh)
-	octopus-b (tag: octopus-b)
-	octopus-a (tag: octopus-a)
-	reach (tag: reach, reach)
-	EOF
-	git log -n6 --decorate=short --pretty="tformat:%f%d" \
-		--decorate-refs-exclude="heads/octopus*" >actual &&
-	test_cmp expect.decorate actual
-'
-
-test_expect_success 'decorate-refs-exclude without globs' '
-	cat >expect.decorate <<-\EOF &&
-	Merge-tag-reach (HEAD -> master)
-	Merge-tags-octopus-a-and-octopus-b
-	seventh (tag: seventh)
-	octopus-b (tag: octopus-b, octopus-b)
-	octopus-a (tag: octopus-a, octopus-a)
-	reach (reach)
-	EOF
-	git log -n6 --decorate=short --pretty="tformat:%f%d" \
-		--decorate-refs-exclude="tags/reach" >actual &&
-	test_cmp expect.decorate actual
-'
-
-test_expect_success 'multiple decorate-refs-exclude' '
-	cat >expect.decorate <<-\EOF &&
-	Merge-tag-reach (HEAD -> master)
-	Merge-tags-octopus-a-and-octopus-b
-	seventh (tag: seventh)
-	octopus-b (tag: octopus-b)
-	octopus-a (tag: octopus-a)
-	reach (reach)
-	EOF
-	git log -n6 --decorate=short --pretty="tformat:%f%d" \
-		--decorate-refs-exclude="heads/octopus*" \
-		--decorate-refs-exclude="tags/reach" >actual &&
-	test_cmp expect.decorate actual
-'
-
-test_expect_success 'decorate-refs and decorate-refs-exclude' '
-	cat >expect.decorate <<-\EOF &&
-	Merge-tag-reach (master)
-	Merge-tags-octopus-a-and-octopus-b
-	seventh
-	octopus-b
-	octopus-a
-	reach (reach)
-	EOF
-	git log -n6 --decorate=short --pretty="tformat:%f%d" \
-		--decorate-refs="heads/*" \
-		--decorate-refs-exclude="heads/oc*" >actual &&
-	test_cmp expect.decorate actual
-'
-
 test_expect_success 'log.decorate config parsing' '
 	git log --oneline --decorate=full >expect.full &&
 	git log --oneline --decorate=short >expect.short &&
@@ -851,7 +750,7 @@ test_expect_success 'log.decorate config parsing' '
 '
 
 test_expect_success TTY 'log output on a TTY' '
-	git log --color --oneline --decorate >expect.short &&
+	git log --oneline --decorate >expect.short &&
 
 	test_terminal git log --oneline >actual &&
 	test_cmp expect.short actual
@@ -1622,12 +1521,6 @@ test_expect_success 'log diagnoses bogus HEAD' '
 	test_i18ngrep broken stderr &&
 	test_must_fail git -C empty log --default totally-bogus 2>stderr &&
 	test_i18ngrep broken stderr
-'
-
-test_expect_success 'log does not default to HEAD when rev input is given' '
-	>expect &&
-	git log --branches=does-not-exist >actual &&
-	test_cmp expect actual
 '
 
 test_expect_success 'set up --source tests' '

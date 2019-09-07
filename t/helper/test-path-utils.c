@@ -1,4 +1,3 @@
-#include "test-tool.h"
 #include "cache.h"
 #include "string-list.h"
 
@@ -38,20 +37,6 @@ struct test_data {
 	const char *to;    /* output: ... to this.            */
 	const char *alternative; /* output: ... or this.      */
 };
-
-/*
- * Compatibility wrappers for OpenBSD, whose basename(3) and dirname(3)
- * have const parameters.
- */
-static char *posix_basename(char *path)
-{
-	return basename(path);
-}
-
-static char *posix_dirname(char *path)
-{
-	return dirname(path);
-}
 
 static int test_function(struct test_data *data, char *(*func)(char *input),
 	const char *funcname)
@@ -171,7 +156,7 @@ static struct test_data dirname_data[] = {
 	{ NULL,              NULL     }
 };
 
-int cmd__path_utils(int argc, const char **argv)
+int cmd_main(int argc, const char **argv)
 {
 	if (argc == 3 && !strcmp(argv[1], "normalize_path_copy")) {
 		char *buf = xmallocz(strlen(argv[2]));
@@ -266,10 +251,10 @@ int cmd__path_utils(int argc, const char **argv)
 	}
 
 	if (argc == 2 && !strcmp(argv[1], "basename"))
-		return test_function(basename_data, posix_basename, argv[1]);
+		return test_function(basename_data, basename, argv[1]);
 
 	if (argc == 2 && !strcmp(argv[1], "dirname"))
-		return test_function(dirname_data, posix_dirname, argv[1]);
+		return test_function(dirname_data, dirname, argv[1]);
 
 	fprintf(stderr, "%s: unknown function name: %s\n", argv[0],
 		argv[1] ? argv[1] : "(there was none)");

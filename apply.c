@@ -75,10 +75,14 @@ static int parse_ignorewhitespace_option(struct apply_state *state,
 }
 
 int init_apply_state(struct apply_state *state,
-		     const char *prefix)
+		     const char *prefix,
+		     struct lock_file *lock_file)
 {
 	memset(state, 0, sizeof(*state));
 	state->prefix = prefix;
+	state->prefix_length = state->prefix ? strlen(state->prefix) : 0;
+	state->lock_file = lock_file;
+	state->newfd = -1;
 	state->apply = 1;
 	state->line_termination = '\n';
 	state->p_value = 1;
@@ -143,6 +147,8 @@ int check_apply_state(struct apply_state *state, int force_apply)
 	}
 	if (state->check_index)
 		state->unsafe_paths = 0;
+	if (!state->lock_file)
+		return error("BUG: state->lock_file should not be NULL");
 
 	if (state->apply_verbosity <= verbosity_silent) {
 		state->saved_error_routine = get_error_routine();
@@ -205,7 +211,6 @@ struct patch {
 	unsigned ws_rule;
 	int lines_added, lines_deleted;
 	int score;
-	int extension_linenr; /* first line specifying delete/new/rename/copy */
 	unsigned int is_toplevel_relative:1;
 	unsigned int inaccurate_eof:1;
 	unsigned int is_binary:1;
@@ -214,7 +219,6 @@ struct patch {
 	unsigned int recount:1;
 	unsigned int conflicted_threeway:1;
 	unsigned int direct_to_threeway:1;
-	unsigned int crlf_in_old:1;
 	struct fragment *fragments;
 	char *result;
 	size_t resultsize;
@@ -300,33 +304,52 @@ static uint32_t hash_line(const char *cp, size_t len)
 static int fuzzy_matchlines(const char *s1, size_t n1,
 			    const char *s2, size_t n2)
 {
-	const char *end1 = s1 + n1;
-	const char *end2 = s2 + n2;
+	const char *last1 = s1 + n1 - 1;
+	const char *last2 = s2 + n2 - 1;
+	int result = 0;
 
 	/* ignore line endings */
-	while (s1 < end1 && (end1[-1] == '\r' || end1[-1] == '\n'))
-		end1--;
-	while (s2 < end2 && (end2[-1] == '\r' || end2[-1] == '\n'))
-		end2--;
+	while ((*last1 == '\r') || (*last1 == '\n'))
+		last1--;
+	while ((*last2 == '\r') || (*last2 == '\n'))
+		last2--;
 
-	while (s1 < end1 && s2 < end2) {
-		if (isspace(*s1)) {
-			/*
-			 * Skip whitespace. We check on both buffers
-			 * because we don't want "a b" to match "ab".
-			 */
-			if (!isspace(*s2))
-				return 0;
-			while (s1 < end1 && isspace(*s1))
+	/* skip leading whitespaces, if both begin with whitespace */
+	if (s1 <= last1 && s2 <= last2 && isspace(*s1) && isspace(*s2)) {
+		while (isspace(*s1) && (s1 <= last1))
+			s1++;
+		while (isspace(*s2) && (s2 <= last2))
+			s2++;
+	}
+	/* early return if both lines are empty */
+	if ((s1 > last1) && (s2 > last2))
+		return 1;
+	while (!result) {
+		result = *s1++ - *s2++;
+		/*
+		 * Skip whitespace inside. We check for whitespace on
+		 * both buffers because we don't want "a b" to match
+		 * "ab"
+		 */
+		if (isspace(*s1) && isspace(*s2)) {
+			while (isspace(*s1) && s1 <= last1)
 				s1++;
-			while (s2 < end2 && isspace(*s2))
+			while (isspace(*s2) && s2 <= last2)
 				s2++;
-		} else if (*s1++ != *s2++)
+		}
+		/*
+		 * If we reached the end on one side only,
+		 * lines don't match
+		 */
+		if (
+		    ((s2 > last2) && (s1 <= last1)) ||
+		    ((s1 > last1) && (s2 <= last2)))
 			return 0;
+		if ((s1 > last1) && (s2 > last2))
+			break;
 	}
 
-	/* If we reached the end on one side only, lines don't match. */
-	return s1 == end1 && s2 == end2;
+	return !result;
 }
 
 static void add_line_info(struct image *img, const char *bol, size_t len, unsigned flag)
@@ -762,11 +785,11 @@ static int guess_p_value(struct apply_state *state, const char *nameline)
 		 * Does it begin with "a/$our-prefix" and such?  Then this is
 		 * very likely to apply to our directory.
 		 */
-		if (starts_with(name, state->prefix))
+		if (!strncmp(name, state->prefix, state->prefix_length))
 			val = count_slashes(state->prefix);
 		else {
 			cp++;
-			if (starts_with(cp, state->prefix))
+			if (!strncmp(cp, state->prefix, state->prefix_length))
 				val = count_slashes(state->prefix) + 1;
 		}
 	}
@@ -788,13 +811,16 @@ static int has_epoch_timestamp(const char *nameline)
 	 * 1970-01-01, and the seconds part must be "00".
 	 */
 	const char stamp_regexp[] =
-		"^[0-2][0-9]:([0-5][0-9]):00(\\.0+)?"
+		"^(1969-12-31|1970-01-01)"
+		" "
+		"[0-2][0-9]:[0-5][0-9]:00(\\.0+)?"
 		" "
 		"([-+][0-2][0-9]:?[0-5][0-9])\n";
 	const char *timestamp = NULL, *cp, *colon;
 	static regex_t *stamp;
 	regmatch_t m[10];
-	int zoneoffset, epoch_hour, hour, minute;
+	int zoneoffset;
+	int hourminute;
 	int status;
 
 	for (cp = nameline; *cp != '\n'; cp++) {
@@ -803,18 +829,6 @@ static int has_epoch_timestamp(const char *nameline)
 	}
 	if (!timestamp)
 		return 0;
-
-	/*
-	 * YYYY-MM-DD hh:mm:ss must be from either 1969-12-31
-	 * (west of GMT) or 1970-01-01 (east of GMT)
-	 */
-	if (skip_prefix(timestamp, "1969-12-31 ", &timestamp))
-		epoch_hour = 24;
-	else if (skip_prefix(timestamp, "1970-01-01 ", &timestamp))
-		epoch_hour = 0;
-	else
-		return 0;
-
 	if (!stamp) {
 		stamp = xmalloc(sizeof(*stamp));
 		if (regcomp(stamp, stamp_regexp, REG_EXTENDED)) {
@@ -832,9 +846,6 @@ static int has_epoch_timestamp(const char *nameline)
 		return 0;
 	}
 
-	hour = strtol(timestamp, NULL, 10);
-	minute = strtol(timestamp + m[1].rm_so, NULL, 10);
-
 	zoneoffset = strtol(timestamp + m[3].rm_so + 1, (char **) &colon, 10);
 	if (*colon == ':')
 		zoneoffset = zoneoffset * 60 + strtol(colon + 1, NULL, 10);
@@ -843,7 +854,20 @@ static int has_epoch_timestamp(const char *nameline)
 	if (timestamp[m[3].rm_so] == '-')
 		zoneoffset = -zoneoffset;
 
-	return hour * 60 + minute - zoneoffset == epoch_hour * 60;
+	/*
+	 * YYYY-MM-DD hh:mm:ss must be from either 1969-12-31
+	 * (west of GMT) or 1970-01-01 (east of GMT)
+	 */
+	if ((zoneoffset < 0 && memcmp(timestamp, "1969-12-31", 10)) ||
+	    (0 <= zoneoffset && memcmp(timestamp, "1970-01-01", 10)))
+		return 0;
+
+	hourminute = (strtol(timestamp + 11, NULL, 10) * 60 +
+		      strtol(timestamp + 14, NULL, 10) -
+		      zoneoffset);
+
+	return ((zoneoffset < 0 && hourminute == 1440) ||
+		(0 <= zoneoffset && !hourminute));
 }
 
 /*
@@ -937,12 +961,13 @@ static int gitdiff_verify_name(struct apply_state *state,
 	}
 
 	if (*name) {
+		int len = strlen(*name);
 		char *another;
 		if (isnull)
 			return error(_("git apply: bad git-diff - expected /dev/null, got %s on line %d"),
 				     *name, state->linenr);
 		another = find_name(state, line, NULL, state->p_value, TERM_TAB);
-		if (!another || strcmp(another, *name)) {
+		if (!another || memcmp(another, *name, len + 1)) {
 			free(another);
 			return error((side == DIFF_NEW_NAME) ?
 			    _("git apply: bad git-diff - inconsistent new filename on line %d") :
@@ -950,7 +975,8 @@ static int gitdiff_verify_name(struct apply_state *state,
 		}
 		free(another);
 	} else {
-		if (!is_dev_null(line))
+		/* expect "/dev/null" */
+		if (memcmp("/dev/null", line, 9) || line[9] != '\n')
 			return error(_("git apply: bad git-diff - expected /dev/null on line %d"), state->linenr);
 	}
 
@@ -975,27 +1001,20 @@ static int gitdiff_newname(struct apply_state *state,
 				   DIFF_NEW_NAME);
 }
 
-static int parse_mode_line(const char *line, int linenr, unsigned int *mode)
-{
-	char *end;
-	*mode = strtoul(line, &end, 8);
-	if (end == line || !isspace(*end))
-		return error(_("invalid mode on line %d: %s"), linenr, line);
-	return 0;
-}
-
 static int gitdiff_oldmode(struct apply_state *state,
 			   const char *line,
 			   struct patch *patch)
 {
-	return parse_mode_line(line, state->linenr, &patch->old_mode);
+	patch->old_mode = strtoul(line, NULL, 8);
+	return 0;
 }
 
 static int gitdiff_newmode(struct apply_state *state,
 			   const char *line,
 			   struct patch *patch)
 {
-	return parse_mode_line(line, state->linenr, &patch->new_mode);
+	patch->new_mode = strtoul(line, NULL, 8);
+	return 0;
 }
 
 static int gitdiff_delete(struct apply_state *state,
@@ -1109,7 +1128,7 @@ static int gitdiff_index(struct apply_state *state,
 	memcpy(patch->new_sha1_prefix, line, len);
 	patch->new_sha1_prefix[len] = 0;
 	if (*ptr == ' ')
-		return gitdiff_oldmode(state, ptr + 1, patch);
+		patch->old_mode = strtoul(ptr+1, NULL, 8);
 	return 0;
 }
 
@@ -1293,18 +1312,6 @@ static char *git_header_name(struct apply_state *state,
 	}
 }
 
-static int check_header_line(struct apply_state *state, struct patch *patch)
-{
-	int extensions = (patch->is_delete == 1) + (patch->is_new == 1) +
-			 (patch->is_rename == 1) + (patch->is_copy == 1);
-	if (extensions > 1)
-		return error(_("inconsistent header lines %d and %d"),
-			     patch->extension_linenr, state->linenr);
-	if (extensions && !patch->extension_linenr)
-		patch->extension_linenr = state->linenr;
-	return 0;
-}
-
 /* Verify that we recognize the lines following a git header */
 static int parse_git_header(struct apply_state *state,
 			    const char *line,
@@ -1370,8 +1377,6 @@ static int parse_git_header(struct apply_state *state,
 				continue;
 			res = p->fn(state, line + oplen, patch);
 			if (res < 0)
-				return -1;
-			if (check_header_line(state, patch))
 				return -1;
 			if (res > 0)
 				return offset;
@@ -1570,8 +1575,7 @@ static int find_header(struct apply_state *state,
 				patch->old_name = xstrdup(patch->def_name);
 				patch->new_name = xstrdup(patch->def_name);
 			}
-			if ((!patch->new_name && !patch->is_delete) ||
-			    (!patch->old_name && !patch->is_new)) {
+			if (!patch->is_delete && !patch->new_name) {
 				error(_("git diff header lacks filename information "
 					     "(line %d)"), state->linenr);
 				return -128;
@@ -1638,19 +1642,6 @@ static void check_whitespace(struct apply_state *state,
 }
 
 /*
- * Check if the patch has context lines with CRLF or
- * the patch wants to remove lines with CRLF.
- */
-static void check_old_for_crlf(struct patch *patch, const char *line, int len)
-{
-	if (len >= 2 && line[len-1] == '\n' && line[len-2] == '\r') {
-		patch->ws_rule |= WS_CR_AT_EOL;
-		patch->crlf_in_old = 1;
-	}
-}
-
-
-/*
  * Parse a unified diff. Note that this really needs to parse each
  * fragment separately, since the only way to know the difference
  * between a "---" that is part of a patch, and a "---" that starts
@@ -1700,14 +1691,11 @@ static int parse_fragment(struct apply_state *state,
 			if (!deleted && !added)
 				leading++;
 			trailing++;
-			check_old_for_crlf(patch, line, len);
 			if (!state->apply_in_reverse &&
 			    state->ws_error_action == correct_ws_error)
 				check_whitespace(state, line, len, patch->ws_rule);
 			break;
 		case '-':
-			if (!state->apply_in_reverse)
-				check_old_for_crlf(patch, line, len);
 			if (state->apply_in_reverse &&
 			    state->ws_error_action != nowarn_ws_error)
 				check_whitespace(state, line, len, patch->ws_rule);
@@ -1716,8 +1704,6 @@ static int parse_fragment(struct apply_state *state,
 			trailing = 0;
 			break;
 		case '+':
-			if (state->apply_in_reverse)
-				check_old_for_crlf(patch, line, len);
 			if (!state->apply_in_reverse &&
 			    state->ws_error_action != nowarn_ws_error)
 				check_whitespace(state, line, len, patch->ws_rule);
@@ -2082,16 +2068,17 @@ static int use_patch(struct apply_state *state, struct patch *p)
 	int i;
 
 	/* Paths outside are not touched regardless of "--include" */
-	if (state->prefix && *state->prefix) {
-		const char *rest;
-		if (!skip_prefix(pathname, state->prefix, &rest) || !*rest)
+	if (0 < state->prefix_length) {
+		int pathlen = strlen(pathname);
+		if (pathlen <= state->prefix_length ||
+		    memcmp(state->prefix, pathname, state->prefix_length))
 			return 0;
 	}
 
 	/* See if it matches any of exclude/include rule */
 	for (i = 0; i < state->limit_by_name.nr; i++) {
 		struct string_list_item *it = &state->limit_by_name.items[i];
-		if (!wildmatch(it->string, pathname, 0))
+		if (!wildmatch(it->string, pathname, 0, NULL))
 			return (it->util != NULL);
 	}
 
@@ -2260,11 +2247,8 @@ static void show_stats(struct apply_state *state, struct patch *patch)
 		add, pluses, del, minuses);
 }
 
-static int read_old_data(struct stat *st, struct patch *patch,
-			 const char *path, struct strbuf *buf)
+static int read_old_data(struct stat *st, const char *path, struct strbuf *buf)
 {
-	int conv_flags = patch->crlf_in_old ?
-		CONV_EOL_KEEP_CRLF : CONV_EOL_RENORMALIZE;
 	switch (st->st_mode & S_IFMT) {
 	case S_IFLNK:
 		if (strbuf_readlink(buf, path, st->st_size) < 0)
@@ -2273,15 +2257,7 @@ static int read_old_data(struct stat *st, struct patch *patch,
 	case S_IFREG:
 		if (strbuf_read_file(buf, path, st->st_size) != st->st_size)
 			return error(_("unable to open or read %s"), path);
-		/*
-		 * "git apply" without "--index/--cached" should never look
-		 * at the index; the target file may not have been added to
-		 * the index yet, and we may not even be in any Git repository.
-		 * Pass NULL to convert_to_git() to stress this; the function
-		 * should never look at the index when explicit crlf option
-		 * is given.
-		 */
-		convert_to_git(NULL, path, buf->buf, buf->len, buf, conv_flags);
+		convert_to_git(&the_index, path, buf->buf, buf->len, buf, 0);
 		return 0;
 	default:
 		return -1;
@@ -2301,7 +2277,7 @@ static void update_pre_post_images(struct image *preimage,
 				   size_t len, size_t postlen)
 {
 	int i, ctx, reduced;
-	char *new_buf, *old_buf, *fixed;
+	char *new, *old, *fixed;
 	struct image fixed_preimage;
 
 	/*
@@ -2327,25 +2303,25 @@ static void update_pre_post_images(struct image *preimage,
 	 * We trust the caller to tell us if the update can be done
 	 * in place (postlen==0) or not.
 	 */
-	old_buf = postimage->buf;
+	old = postimage->buf;
 	if (postlen)
-		new_buf = postimage->buf = xmalloc(postlen);
+		new = postimage->buf = xmalloc(postlen);
 	else
-		new_buf = old_buf;
+		new = old;
 	fixed = preimage->buf;
 
 	for (i = reduced = ctx = 0; i < postimage->nr; i++) {
 		size_t l_len = postimage->line[i].len;
 		if (!(postimage->line[i].flag & LINE_COMMON)) {
 			/* an added line -- no counterparts in preimage */
-			memmove(new_buf, old_buf, l_len);
-			old_buf += l_len;
-			new_buf += l_len;
+			memmove(new, old, l_len);
+			old += l_len;
+			new += l_len;
 			continue;
 		}
 
 		/* a common context -- skip it in the original postimage */
-		old_buf += l_len;
+		old += l_len;
 
 		/* and find the corresponding one in the fixed preimage */
 		while (ctx < preimage->nr &&
@@ -2365,29 +2341,29 @@ static void update_pre_post_images(struct image *preimage,
 
 		/* and copy it in, while fixing the line length */
 		l_len = preimage->line[ctx].len;
-		memcpy(new_buf, fixed, l_len);
-		new_buf += l_len;
+		memcpy(new, fixed, l_len);
+		new += l_len;
 		fixed += l_len;
 		postimage->line[i].len = l_len;
 		ctx++;
 	}
 
 	if (postlen
-	    ? postlen < new_buf - postimage->buf
-	    : postimage->len < new_buf - postimage->buf)
+	    ? postlen < new - postimage->buf
+	    : postimage->len < new - postimage->buf)
 		die("BUG: caller miscounted postlen: asked %d, orig = %d, used = %d",
-		    (int)postlen, (int) postimage->len, (int)(new_buf - postimage->buf));
+		    (int)postlen, (int) postimage->len, (int)(new - postimage->buf));
 
 	/* Fix the length of the whole thing */
-	postimage->len = new_buf - postimage->buf;
+	postimage->len = new - postimage->buf;
 	postimage->nr -= reduced;
 }
 
 static int line_by_line_fuzzy_match(struct image *img,
 				    struct image *preimage,
 				    struct image *postimage,
-				    unsigned long current,
-				    int current_lno,
+				    unsigned long try,
+				    int try_lno,
 				    int preimage_limit)
 {
 	int i;
@@ -2404,9 +2380,9 @@ static int line_by_line_fuzzy_match(struct image *img,
 
 	for (i = 0; i < preimage_limit; i++) {
 		size_t prelen = preimage->line[i].len;
-		size_t imglen = img->line[current_lno+i].len;
+		size_t imglen = img->line[try_lno+i].len;
 
-		if (!fuzzy_matchlines(img->buf + current + imgoff, imglen,
+		if (!fuzzy_matchlines(img->buf + try + imgoff, imglen,
 				      preimage->buf + preoff, prelen))
 			return 0;
 		if (preimage->line[i].flag & LINE_COMMON)
@@ -2443,7 +2419,7 @@ static int line_by_line_fuzzy_match(struct image *img,
 	 */
 	extra_chars = preimage_end - preimage_eof;
 	strbuf_init(&fixed, imgoff + extra_chars);
-	strbuf_add(&fixed, img->buf + current, imgoff);
+	strbuf_add(&fixed, img->buf + try, imgoff);
 	strbuf_add(&fixed, preimage_eof, extra_chars);
 	fixed_buf = strbuf_detach(&fixed, &fixed_len);
 	update_pre_post_images(preimage, postimage,
@@ -2455,8 +2431,8 @@ static int match_fragment(struct apply_state *state,
 			  struct image *img,
 			  struct image *preimage,
 			  struct image *postimage,
-			  unsigned long current,
-			  int current_lno,
+			  unsigned long try,
+			  int try_lno,
 			  unsigned ws_rule,
 			  int match_beginning, int match_end)
 {
@@ -2466,12 +2442,12 @@ static int match_fragment(struct apply_state *state,
 	size_t fixed_len, postlen;
 	int preimage_limit;
 
-	if (preimage->nr + current_lno <= img->nr) {
+	if (preimage->nr + try_lno <= img->nr) {
 		/*
 		 * The hunk falls within the boundaries of img.
 		 */
 		preimage_limit = preimage->nr;
-		if (match_end && (preimage->nr + current_lno != img->nr))
+		if (match_end && (preimage->nr + try_lno != img->nr))
 			return 0;
 	} else if (state->ws_error_action == correct_ws_error &&
 		   (ws_rule & WS_BLANK_AT_EOF)) {
@@ -2482,7 +2458,7 @@ static int match_fragment(struct apply_state *state,
 		 * match with img, and the remainder of the preimage
 		 * must be blank.
 		 */
-		preimage_limit = img->nr - current_lno;
+		preimage_limit = img->nr - try_lno;
 	} else {
 		/*
 		 * The hunk extends beyond the end of the img and
@@ -2492,27 +2468,27 @@ static int match_fragment(struct apply_state *state,
 		return 0;
 	}
 
-	if (match_beginning && current_lno)
+	if (match_beginning && try_lno)
 		return 0;
 
 	/* Quick hash check */
 	for (i = 0; i < preimage_limit; i++)
-		if ((img->line[current_lno + i].flag & LINE_PATCHED) ||
-		    (preimage->line[i].hash != img->line[current_lno + i].hash))
+		if ((img->line[try_lno + i].flag & LINE_PATCHED) ||
+		    (preimage->line[i].hash != img->line[try_lno + i].hash))
 			return 0;
 
 	if (preimage_limit == preimage->nr) {
 		/*
 		 * Do we have an exact match?  If we were told to match
-		 * at the end, size must be exactly at current+fragsize,
-		 * otherwise current+fragsize must be still within the preimage,
+		 * at the end, size must be exactly at try+fragsize,
+		 * otherwise try+fragsize must be still within the preimage,
 		 * and either case, the old piece should match the preimage
 		 * exactly.
 		 */
 		if ((match_end
-		     ? (current + preimage->len == img->len)
-		     : (current + preimage->len <= img->len)) &&
-		    !memcmp(img->buf + current, preimage->buf, preimage->len))
+		     ? (try + preimage->len == img->len)
+		     : (try + preimage->len <= img->len)) &&
+		    !memcmp(img->buf + try, preimage->buf, preimage->len))
 			return 1;
 	} else {
 		/*
@@ -2543,7 +2519,7 @@ static int match_fragment(struct apply_state *state,
 	 */
 	if (state->ws_ignore_action == ignore_ws_change)
 		return line_by_line_fuzzy_match(img, preimage, postimage,
-						current, current_lno, preimage_limit);
+						try, try_lno, preimage_limit);
 
 	if (state->ws_error_action != correct_ws_error)
 		return 0;
@@ -2577,10 +2553,10 @@ static int match_fragment(struct apply_state *state,
 	 */
 	strbuf_init(&fixed, preimage->len + 1);
 	orig = preimage->buf;
-	target = img->buf + current;
+	target = img->buf + try;
 	for (i = 0; i < preimage_limit; i++) {
 		size_t oldlen = preimage->line[i].len;
-		size_t tgtlen = img->line[current_lno + i].len;
+		size_t tgtlen = img->line[try_lno + i].len;
 		size_t fixstart = fixed.len;
 		struct strbuf tgtfix;
 		int match;
@@ -2666,8 +2642,8 @@ static int find_pos(struct apply_state *state,
 		    int match_beginning, int match_end)
 {
 	int i;
-	unsigned long backwards, forwards, current;
-	int backwards_lno, forwards_lno, current_lno;
+	unsigned long backwards, forwards, try;
+	int backwards_lno, forwards_lno, try_lno;
 
 	/*
 	 * If match_beginning or match_end is specified, there is no
@@ -2687,25 +2663,25 @@ static int find_pos(struct apply_state *state,
 	if ((size_t) line > img->nr)
 		line = img->nr;
 
-	current = 0;
+	try = 0;
 	for (i = 0; i < line; i++)
-		current += img->line[i].len;
+		try += img->line[i].len;
 
 	/*
 	 * There's probably some smart way to do this, but I'll leave
 	 * that to the smart and beautiful people. I'm simple and stupid.
 	 */
-	backwards = current;
+	backwards = try;
 	backwards_lno = line;
-	forwards = current;
+	forwards = try;
 	forwards_lno = line;
-	current_lno = line;
+	try_lno = line;
 
 	for (i = 0; ; i++) {
 		if (match_fragment(state, img, preimage, postimage,
-				   current, current_lno, ws_rule,
+				   try, try_lno, ws_rule,
 				   match_beginning, match_end))
-			return current_lno;
+			return try_lno;
 
 	again:
 		if (backwards_lno == 0 && forwards_lno == img->nr)
@@ -2718,8 +2694,8 @@ static int find_pos(struct apply_state *state,
 			}
 			backwards_lno--;
 			backwards -= img->line[backwards_lno].len;
-			current = backwards;
-			current_lno = backwards_lno;
+			try = backwards;
+			try_lno = backwards_lno;
 		} else {
 			if (forwards_lno == img->nr) {
 				i++;
@@ -2727,8 +2703,8 @@ static int find_pos(struct apply_state *state,
 			}
 			forwards += img->line[forwards_lno].len;
 			forwards_lno++;
-			current = forwards;
-			current_lno = forwards_lno;
+			try = forwards;
+			try_lno = forwards_lno;
 		}
 
 	}
@@ -2812,10 +2788,13 @@ static void update_image(struct apply_state *state,
 		img->line_allocated = img->line;
 	}
 	if (preimage_limit != postimage->nr)
-		MOVE_ARRAY(img->line + applied_pos + postimage->nr,
-			   img->line + applied_pos + preimage_limit,
-			   img->nr - (applied_pos + preimage_limit));
-	COPY_ARRAY(img->line + applied_pos, postimage->line, postimage->nr);
+		memmove(img->line + applied_pos + postimage->nr,
+			img->line + applied_pos + preimage_limit,
+			(img->nr - (applied_pos + preimage_limit)) *
+			sizeof(*img->line));
+	memcpy(img->line + applied_pos,
+	       postimage->line,
+	       postimage->nr * sizeof(*img->line));
 	if (!state->allow_overlap)
 		for (i = 0; i < postimage->nr; i++)
 			img->line[applied_pos + i].flag |= LINE_PATCHED;
@@ -2896,7 +2875,6 @@ static int apply_one_fragment(struct apply_state *state,
 			if (plen && (ws_rule & WS_BLANK_AT_EOF) &&
 			    ws_blank_line(patch + 1, plen, ws_rule))
 				is_blank_context = 1;
-			/* fallthrough */
 		case '-':
 			memcpy(old, patch + 1, plen);
 			add_line_info(&preimage, old, plen,
@@ -2904,7 +2882,7 @@ static int apply_one_fragment(struct apply_state *state,
 			old += plen;
 			if (first == '-')
 				break;
-			/* fallthrough */
+		/* Fall-through for ' ' */
 		case '+':
 			/* --no-add does not add new lines */
 			if (first == '+' && state->no_add)
@@ -2953,8 +2931,6 @@ static int apply_one_fragment(struct apply_state *state,
 	    newlines.len > 0 && newlines.buf[newlines.len - 1] == '\n') {
 		old--;
 		strbuf_setlen(&newlines, newlines.len - 1);
-		preimage.line_allocated[preimage.nr - 1].len--;
-		postimage.line_allocated[postimage.nr - 1].len--;
 	}
 
 	leading = frag->leading;
@@ -3154,7 +3130,7 @@ static int apply_binary(struct apply_state *state,
 		 * See if the old one matches what the patch
 		 * applies to.
 		 */
-		hash_object_file(img->buf, img->len, blob_type, &oid);
+		hash_sha1_file(img->buf, img->len, blob_type, oid.hash);
 		if (strcmp(oid_to_hex(&oid), patch->old_sha1_prefix))
 			return error(_("the patch applies to '%s' (%s), "
 				       "which does not match the "
@@ -3180,7 +3156,7 @@ static int apply_binary(struct apply_state *state,
 		unsigned long size;
 		char *result;
 
-		result = read_object_file(&oid, &type, &size);
+		result = read_sha1_file(oid.hash, &type, &size);
 		if (!result)
 			return error(_("the necessary postimage %s for "
 				       "'%s' cannot be read"),
@@ -3199,7 +3175,7 @@ static int apply_binary(struct apply_state *state,
 				     name);
 
 		/* verify that the result matches */
-		hash_object_file(img->buf, img->len, blob_type, &oid);
+		hash_sha1_file(img->buf, img->len, blob_type, oid.hash);
 		if (strcmp(oid_to_hex(&oid), patch->new_sha1_prefix))
 			return error(_("binary patch to '%s' creates incorrect result (expecting %s, got %s)"),
 				name, patch->new_sha1_prefix, oid_to_hex(&oid));
@@ -3242,7 +3218,7 @@ static int read_blob_object(struct strbuf *buf, const struct object_id *oid, uns
 		unsigned long sz;
 		char *result;
 
-		result = read_object_file(oid, &type, &sz);
+		result = read_sha1_file(oid->hash, &type, &sz);
 		if (!result)
 			return -1;
 		/* XXX read_sha1_file NUL-terminates */
@@ -3387,7 +3363,6 @@ static int load_patch_target(struct apply_state *state,
 			     struct strbuf *buf,
 			     const struct cache_entry *ce,
 			     struct stat *st,
-			     struct patch *patch,
 			     const char *name,
 			     unsigned expected_mode)
 {
@@ -3403,7 +3378,7 @@ static int load_patch_target(struct apply_state *state,
 		} else if (has_symlink_leading_path(name, strlen(name))) {
 			return error(_("reading from '%s' beyond a symbolic link"), name);
 		} else {
-			if (read_old_data(st, patch, name, buf))
+			if (read_old_data(st, name, buf))
 				return error(_("failed to read %s"), name);
 		}
 	}
@@ -3436,7 +3411,7 @@ static int load_preimage(struct apply_state *state,
 		/* We have a patched copy in memory; use that. */
 		strbuf_add(&buf, previous->result, previous->resultsize);
 	} else {
-		status = load_patch_target(state, &buf, ce, st, patch,
+		status = load_patch_target(state, &buf, ce, st,
 					   patch->old_name, patch->old_mode);
 		if (status < 0)
 			return status;
@@ -3524,7 +3499,7 @@ static int load_current(struct apply_state *state,
 	if (verify_index_match(ce, &st))
 		return error(_("%s: does not match index"), name);
 
-	status = load_patch_target(state, &buf, ce, &st, patch, name, mode);
+	status = load_patch_target(state, &buf, ce, &st, name, mode);
 	if (status < 0)
 		return status;
 	else if (status)
@@ -3554,8 +3529,8 @@ static int try_threeway(struct apply_state *state,
 
 	/* Preimage the patch was prepared for */
 	if (patch->is_new)
-		write_object_file("", 0, blob_type, &pre_oid);
-	else if (get_oid(patch->old_sha1_prefix, &pre_oid) ||
+		write_sha1_file("", 0, blob_type, pre_oid.hash);
+	else if (get_sha1(patch->old_sha1_prefix, pre_oid.hash) ||
 		 read_blob_object(&buf, &pre_oid, patch->old_mode))
 		return error(_("repository lacks the necessary blob to fall back on 3-way merge."));
 
@@ -3570,7 +3545,7 @@ static int try_threeway(struct apply_state *state,
 		return -1;
 	}
 	/* post_oid is theirs */
-	write_object_file(tmp_image.buf, tmp_image.len, blob_type, &post_oid);
+	write_sha1_file(tmp_image.buf, tmp_image.len, blob_type, post_oid.hash);
 	clear_image(&tmp_image);
 
 	/* our_oid is ours */
@@ -3583,7 +3558,7 @@ static int try_threeway(struct apply_state *state,
 			return error(_("cannot read the current contents of '%s'"),
 				     patch->old_name);
 	}
-	write_object_file(tmp_image.buf, tmp_image.len, blob_type, &our_oid);
+	write_sha1_file(tmp_image.buf, tmp_image.len, blob_type, our_oid.hash);
 	clear_image(&tmp_image);
 
 	/* in-core three-way merge between post and our using pre as base */
@@ -4079,7 +4054,7 @@ static int build_fake_ancestor(struct apply_state *state, struct patch *list)
 			else
 				return error(_("sha1 information is lacking or "
 					       "useless for submodule %s"), name);
-		} else if (!get_oid_blob(patch->old_sha1_prefix, &oid)) {
+		} else if (!get_sha1_blob(patch->old_sha1_prefix, oid.hash)) {
 			; /* ok */
 		} else if (!patch->lines_added && !patch->lines_deleted) {
 			/* mode-only change: update the current */
@@ -4163,30 +4138,30 @@ static void show_mode_change(struct patch *p, int show_name)
 static void show_rename_copy(struct patch *p)
 {
 	const char *renamecopy = p->is_rename ? "rename" : "copy";
-	const char *old_name, *new_name;
+	const char *old, *new;
 
 	/* Find common prefix */
-	old_name = p->old_name;
-	new_name = p->new_name;
+	old = p->old_name;
+	new = p->new_name;
 	while (1) {
 		const char *slash_old, *slash_new;
-		slash_old = strchr(old_name, '/');
-		slash_new = strchr(new_name, '/');
+		slash_old = strchr(old, '/');
+		slash_new = strchr(new, '/');
 		if (!slash_old ||
 		    !slash_new ||
-		    slash_old - old_name != slash_new - new_name ||
-		    memcmp(old_name, new_name, slash_new - new_name))
+		    slash_old - old != slash_new - new ||
+		    memcmp(old, new, slash_new - new))
 			break;
-		old_name = slash_old + 1;
-		new_name = slash_new + 1;
+		old = slash_old + 1;
+		new = slash_new + 1;
 	}
-	/* p->old_name thru old_name is the common prefix, and old_name and new_name
+	/* p->old_name thru old is the common prefix, and old and new
 	 * through the end of names are renames
 	 */
-	if (old_name != p->old_name)
+	if (old != p->old_name)
 		printf(" %s %.*s{%s => %s} (%d%%)\n", renamecopy,
-		       (int)(old_name - p->old_name), p->old_name,
-		       old_name, new_name, p->score);
+		       (int)(old - p->old_name), p->old_name,
+		       old, new, p->score);
 	else
 		printf(" %s %s => %s (%d%%)\n", renamecopy,
 		       p->old_name, p->new_name, p->score);
@@ -4291,7 +4266,7 @@ static int add_index_file(struct apply_state *state,
 			}
 			fill_stat_cache_info(ce, &st);
 		}
-		if (write_object_file(buf, size, blob_type, &ce->oid) < 0) {
+		if (write_sha1_file(buf, size, blob_type, ce->oid.hash) < 0) {
 			free(ce);
 			return error(_("unable to create backing store "
 				       "for newly created file %s"), path);
@@ -4687,13 +4662,13 @@ static int apply_patch(struct apply_state *state,
 		state->apply = 0;
 
 	state->update_index = state->check_index && state->apply;
-	if (state->update_index && !is_lock_file_locked(&state->lock_file)) {
+	if (state->update_index && state->newfd < 0) {
 		if (state->index_file)
-			hold_lock_file_for_update(&state->lock_file,
-						  state->index_file,
-						  LOCK_DIE_ON_ERROR);
+			state->newfd = hold_lock_file_for_update(state->lock_file,
+								 state->index_file,
+								 LOCK_DIE_ON_ERROR);
 		else
-			hold_locked_index(&state->lock_file, LOCK_DIE_ON_ERROR);
+			state->newfd = hold_locked_index(state->lock_file, LOCK_DIE_ON_ERROR);
 	}
 
 	if (state->check_index && read_apply_cache(state) < 0) {
@@ -4889,18 +4864,22 @@ int apply_all_patches(struct apply_state *state,
 	}
 
 	if (state->update_index) {
-		res = write_locked_index(&the_index, &state->lock_file, COMMIT_LOCK);
+		res = write_locked_index(&the_index, state->lock_file, COMMIT_LOCK);
 		if (res) {
 			error(_("Unable to write new index file"));
 			res = -128;
 			goto end;
 		}
+		state->newfd = -1;
 	}
 
 	res = !!errs;
 
 end:
-	rollback_lock_file(&state->lock_file);
+	if (state->newfd >= 0) {
+		rollback_lock_file(state->lock_file);
+		state->newfd = -1;
+	}
 
 	if (state->apply_verbosity <= verbosity_silent) {
 		set_error_routine(state->saved_error_routine);
@@ -4943,9 +4922,8 @@ int apply_parse_options(int argc, const char **argv,
 			N_("make sure the patch is applicable to the current index")),
 		OPT_BOOL(0, "cached", &state->cached,
 			N_("apply a patch without touching the working tree")),
-		OPT_BOOL_F(0, "unsafe-paths", &state->unsafe_paths,
-			   N_("accept a patch that touches outside the working area"),
-			   PARSE_OPT_NOCOMPLETE),
+		OPT_BOOL(0, "unsafe-paths", &state->unsafe_paths,
+			N_("accept a patch that touches outside the working area")),
 		OPT_BOOL(0, "apply", force_apply,
 			N_("also apply the patch (use with --stat/--summary/--check)")),
 		OPT_BOOL('3', "3way", &state->threeway,

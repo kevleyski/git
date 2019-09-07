@@ -14,20 +14,20 @@ static unsigned int hash_obj(const struct object *obj, unsigned int n)
 static void *insert_decoration(struct decoration *n, const struct object *base, void *decoration)
 {
 	int size = n->size;
-	struct decoration_entry *entries = n->entries;
+	struct object_decoration *hash = n->hash;
 	unsigned int j = hash_obj(base, size);
 
-	while (entries[j].base) {
-		if (entries[j].base == base) {
-			void *old = entries[j].decoration;
-			entries[j].decoration = decoration;
+	while (hash[j].base) {
+		if (hash[j].base == base) {
+			void *old = hash[j].decoration;
+			hash[j].decoration = decoration;
 			return old;
 		}
 		if (++j >= size)
 			j = 0;
 	}
-	entries[j].base = base;
-	entries[j].decoration = decoration;
+	hash[j].base = base;
+	hash[j].decoration = decoration;
 	n->nr++;
 	return NULL;
 }
@@ -36,23 +36,24 @@ static void grow_decoration(struct decoration *n)
 {
 	int i;
 	int old_size = n->size;
-	struct decoration_entry *old_entries = n->entries;
+	struct object_decoration *old_hash = n->hash;
 
 	n->size = (old_size + 1000) * 3 / 2;
-	n->entries = xcalloc(n->size, sizeof(struct decoration_entry));
+	n->hash = xcalloc(n->size, sizeof(struct object_decoration));
 	n->nr = 0;
 
 	for (i = 0; i < old_size; i++) {
-		const struct object *base = old_entries[i].base;
-		void *decoration = old_entries[i].decoration;
+		const struct object *base = old_hash[i].base;
+		void *decoration = old_hash[i].decoration;
 
 		if (!decoration)
 			continue;
 		insert_decoration(n, base, decoration);
 	}
-	free(old_entries);
+	free(old_hash);
 }
 
+/* Add a decoration pointer, return any old one */
 void *add_decoration(struct decoration *n, const struct object *obj,
 		void *decoration)
 {
@@ -63,6 +64,7 @@ void *add_decoration(struct decoration *n, const struct object *obj,
 	return insert_decoration(n, obj, decoration);
 }
 
+/* Lookup a decoration pointer */
 void *lookup_decoration(struct decoration *n, const struct object *obj)
 {
 	unsigned int j;
@@ -72,7 +74,7 @@ void *lookup_decoration(struct decoration *n, const struct object *obj)
 		return NULL;
 	j = hash_obj(obj, n->size);
 	for (;;) {
-		struct decoration_entry *ref = n->entries + j;
+		struct object_decoration *ref = n->hash + j;
 		if (ref->base == obj)
 			return ref->decoration;
 		if (!ref->base)

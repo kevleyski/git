@@ -171,9 +171,9 @@ test_expect_success 'verbose' '
 
 test_expect_success 'verbose respects diff config' '
 
-	test_config diff.noprefix true &&
+	test_config color.diff always &&
 	git status -v >actual &&
-	grep "diff --git negative negative" actual
+	grep "\[1mdiff --git" actual
 '
 
 mesg_with_comment_and_newlines='

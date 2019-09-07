@@ -1,4 +1,3 @@
-#include "test-tool.h"
 #include "cache.h"
 #include "sigchain.h"
 
@@ -14,7 +13,7 @@ X(two)
 X(three)
 #undef X
 
-int cmd__sigchain(int argc, const char **argv) {
+int cmd_main(int argc, const char **argv) {
 	sigchain_push(SIGTERM, one);
 	sigchain_push(SIGTERM, two);
 	sigchain_push(SIGTERM, three);

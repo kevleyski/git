@@ -25,7 +25,7 @@ static int send_request(const char *socket, const struct strbuf *out)
 		int r;
 
 		r = read_in_full(fd, in, sizeof(in));
-		if (r == 0 || (r < 0 && errno == ECONNRESET))
+		if (r == 0)
 			break;
 		if (r < 0)
 			die_errno("read error from cache daemon");

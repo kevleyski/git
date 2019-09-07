@@ -1,40 +1,49 @@
 #include "cache.h"
 #include "oidset.h"
 
+struct oidset_entry {
+	struct hashmap_entry hash;
+	struct object_id oid;
+};
+
+static int oidset_hashcmp(const void *va, const void *vb,
+			  const void *vkey)
+{
+	const struct oidset_entry *a = va, *b = vb;
+	const struct object_id *key = vkey;
+	return oidcmp(&a->oid, key ? key : &b->oid);
+}
+
 int oidset_contains(const struct oidset *set, const struct object_id *oid)
 {
-	if (!set->map.map.tablesize)
+	struct hashmap_entry key;
+
+	if (!set->map.cmpfn)
 		return 0;
-	return !!oidmap_get(&set->map, oid);
+
+	hashmap_entry_init(&key, sha1hash(oid->hash));
+	return !!hashmap_get(&set->map, &key, oid);
 }
 
 int oidset_insert(struct oidset *set, const struct object_id *oid)
 {
-	struct oidmap_entry *entry;
+	struct oidset_entry *entry;
 
-	if (!set->map.map.tablesize)
-		oidmap_init(&set->map, 0);
-	else if (oidset_contains(set, oid))
+	if (!set->map.cmpfn)
+		hashmap_init(&set->map, oidset_hashcmp, 0);
+
+	if (oidset_contains(set, oid))
 		return 1;
 
 	entry = xmalloc(sizeof(*entry));
+	hashmap_entry_init(&entry->hash, sha1hash(oid->hash));
 	oidcpy(&entry->oid, oid);
 
-	oidmap_put(&set->map, entry);
+	hashmap_add(&set->map, entry);
 	return 0;
-}
-
-int oidset_remove(struct oidset *set, const struct object_id *oid)
-{
-	struct oidmap_entry *entry;
-
-	entry = oidmap_remove(&set->map, oid);
-	free(entry);
-
-	return (entry != NULL);
 }
 
 void oidset_clear(struct oidset *set)
 {
-	oidmap_free(&set->map, 1);
+	hashmap_free(&set->map, 1);
 }

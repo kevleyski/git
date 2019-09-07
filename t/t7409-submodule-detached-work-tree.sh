@@ -6,7 +6,7 @@
 test_description='Test submodules on detached working tree
 
 This test verifies that "git submodule" initialization, update and addition works
-on detached working trees
+on detahced working trees
 '
 
 TEST_NO_CREATE_REPO=1

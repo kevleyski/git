@@ -43,20 +43,20 @@ test_expect_success 'fast-export | fast-import' '
 	MUSS=$(git rev-parse --verify muss) &&
 	mkdir new &&
 	git --git-dir=new/.git init &&
-	git fast-export --all >actual &&
+	git fast-export --all |
 	(cd new &&
 	 git fast-import &&
 	 test $MASTER = $(git rev-parse --verify refs/heads/master) &&
 	 test $REIN = $(git rev-parse --verify refs/tags/rein) &&
 	 test $WER = $(git rev-parse --verify refs/heads/wer) &&
-	 test $MUSS = $(git rev-parse --verify refs/tags/muss)) <actual
+	 test $MUSS = $(git rev-parse --verify refs/tags/muss))
 
 '
 
 test_expect_success 'fast-export master~2..master' '
 
-	git fast-export master~2..master >actual &&
-	sed "s/master/partial/" actual |
+	git fast-export master~2..master |
+		sed "s/master/partial/" |
 		(cd new &&
 		 git fast-import &&
 		 test $MASTER != $(git rev-parse --verify refs/heads/partial) &&
@@ -74,12 +74,11 @@ test_expect_success 'iso-8859-1' '
 	test_tick &&
 	echo rosten >file &&
 	git commit -s -m den file &&
-	git fast-export wer^..wer >iso8859-1.fi &&
-	sed "s/wer/i18n/" iso8859-1.fi |
+	git fast-export wer^..wer |
+		sed "s/wer/i18n/" |
 		(cd new &&
 		 git fast-import &&
-		 git cat-file commit i18n >actual &&
-		 grep "Áéí óú" actual)
+		 git cat-file commit i18n | grep "Áéí óú")
 
 '
 test_expect_success 'import/export-marks' '
@@ -88,14 +87,20 @@ test_expect_success 'import/export-marks' '
 	git fast-export --export-marks=tmp-marks HEAD &&
 	test -s tmp-marks &&
 	test_line_count = 3 tmp-marks &&
-	git fast-export --import-marks=tmp-marks \
-		--export-marks=tmp-marks HEAD >actual &&
-	test $(grep ^commit actual | wc -l) -eq 0 &&
+	test $(
+		git fast-export --import-marks=tmp-marks\
+		--export-marks=tmp-marks HEAD |
+		grep ^commit |
+		wc -l) \
+	-eq 0 &&
 	echo change > file &&
 	git commit -m "last commit" file &&
-	git fast-export --import-marks=tmp-marks \
-		--export-marks=tmp-marks HEAD >actual &&
-	test $(grep ^commit\  actual | wc -l) -eq 1 &&
+	test $(
+		git fast-export --import-marks=tmp-marks \
+		--export-marks=tmp-marks HEAD |
+		grep ^commit\  |
+		wc -l) \
+	-eq 1 &&
 	test_line_count = 4 tmp-marks
 
 '
@@ -179,7 +184,7 @@ test_expect_success 'submodule fast-export | fast-import' '
 	rm -rf new &&
 	mkdir new &&
 	git --git-dir=new/.git init &&
-	git fast-export --signed-tags=strip --all >actual &&
+	git fast-export --signed-tags=strip --all |
 	(cd new &&
 	 git fast-import &&
 	 test "$SUBENT1" = "$(git ls-tree refs/heads/master^ sub)" &&
@@ -187,7 +192,7 @@ test_expect_success 'submodule fast-export | fast-import' '
 	 git checkout master &&
 	 git submodule init &&
 	 git submodule update &&
-	 cmp sub/file ../sub/file) <actual
+	 cmp sub/file ../sub/file)
 
 '
 
@@ -229,7 +234,7 @@ test_expect_success 'fast-export -C -C | fast-import' '
 	mkdir new &&
 	git --git-dir=new/.git init &&
 	git fast-export -C -C --signed-tags=strip --all > output &&
-	grep "^C file2 file4\$" output &&
+	grep "^C file6 file7\$" output &&
 	cat output |
 	(cd new &&
 	 git fast-import &&
@@ -362,14 +367,12 @@ test_expect_success 'path limiting with import-marks does not lose unmodified fi
 	echo more content >> file &&
 	test_tick &&
 	git commit -mnext file &&
-	git fast-export --import-marks=marks simple -- file file0 >actual &&
-	grep file0 actual
+	git fast-export --import-marks=marks simple -- file file0 | grep file0
 '
 
 test_expect_success 'full-tree re-shows unmodified files'        '
 	git checkout -f simple &&
-	git fast-export --full-tree simple >actual &&
-	test $(grep -c file0 actual) -eq 3
+	test $(git fast-export --full-tree simple | grep -c file0) -eq 3
 '
 
 test_expect_success 'set-up a few more tags for tag export tests' '
@@ -502,8 +505,8 @@ test_expect_success 'refs are updated even if no commits need to be exported' '
 '
 
 test_expect_success 'use refspec' '
-	git fast-export --refspec refs/heads/master:refs/heads/foobar master >actual2 &&
-	grep "^commit " actual2 | sort | uniq >actual &&
+	git fast-export --refspec refs/heads/master:refs/heads/foobar master | \
+		grep "^commit " | sort | uniq > actual &&
 	echo "commit refs/heads/foobar" > expected &&
 	test_cmp expected actual
 '
@@ -516,25 +519,6 @@ test_expect_success 'delete refspec' '
 	from 0000000000000000000000000000000000000000
 
 	EOF
-	test_cmp expected actual
-'
-
-test_expect_success 'when using -C, do not declare copy when source of copy is also modified' '
-	test_create_repo src &&
-	echo a_line >src/file.txt &&
-	git -C src add file.txt &&
-	git -C src commit -m 1st_commit &&
-
-	cp src/file.txt src/file2.txt &&
-	echo another_line >>src/file.txt &&
-	git -C src add file.txt file2.txt &&
-	git -C src commit -m 2nd_commit &&
-
-	test_create_repo dst &&
-	git -C src fast-export --all -C >actual &&
-	git -C dst fast-import <actual &&
-	git -C src show >expected &&
-	git -C dst show >actual &&
 	test_cmp expected actual
 '
 

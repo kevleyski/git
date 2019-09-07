@@ -93,9 +93,8 @@ struct anonymized_entry {
 	size_t anon_len;
 };
 
-static int anonymized_entry_cmp(const void *unused_cmp_data,
-				const void *va, const void *vb,
-				const void *unused_keydata)
+static int anonymized_entry_cmp(const void *va, const void *vb,
+				const void *data)
 {
 	const struct anonymized_entry *a = va, *b = vb;
 	return a->orig_len != b->orig_len ||
@@ -114,7 +113,7 @@ static const void *anonymize_mem(struct hashmap *map,
 	struct anonymized_entry key, *ret;
 
 	if (!map->cmpfn)
-		hashmap_init(map, anonymized_entry_cmp, NULL, 0);
+		hashmap_init(map, anonymized_entry_cmp, 0);
 
 	hashmap_entry_init(&key, memhash(orig, *len));
 	key.orig = orig;
@@ -237,10 +236,10 @@ static void export_blob(const struct object_id *oid)
 		object = (struct object *)lookup_blob(oid);
 		eaten = 0;
 	} else {
-		buf = read_object_file(oid, &type, &size);
+		buf = read_sha1_file(oid->hash, &type, &size);
 		if (!buf)
 			die ("Could not read blob %s", oid_to_hex(oid));
-		if (check_object_signature(oid, buf, size, type_name(type)) < 0)
+		if (check_sha1_signature(oid->hash, buf, size, typename(type)) < 0)
 			die("sha1 mismatch in blob %s", oid_to_hex(oid));
 		object = parse_object_buffer(oid, type, size, buf, &eaten);
 	}
@@ -344,7 +343,6 @@ static void show_filemodify(struct diff_queue_struct *q,
 			    struct diff_options *options, void *data)
 {
 	int i;
-	struct string_list *changed = data;
 
 	/*
 	 * Handle files below a directory first, in case they are all deleted
@@ -360,31 +358,20 @@ static void show_filemodify(struct diff_queue_struct *q,
 		case DIFF_STATUS_DELETED:
 			printf("D ");
 			print_path(spec->path);
-			string_list_insert(changed, spec->path);
 			putchar('\n');
 			break;
 
 		case DIFF_STATUS_COPIED:
 		case DIFF_STATUS_RENAMED:
-			/*
-			 * If a change in the file corresponding to ospec->path
-			 * has been observed, we cannot trust its contents
-			 * because the diff is calculated based on the prior
-			 * contents, not the current contents.  So, declare a
-			 * copy or rename only if there was no change observed.
-			 */
-			if (!string_list_has_string(changed, ospec->path)) {
-				printf("%c ", q->queue[i]->status);
-				print_path(ospec->path);
-				putchar(' ');
-				print_path(spec->path);
-				string_list_insert(changed, spec->path);
-				putchar('\n');
+			printf("%c ", q->queue[i]->status);
+			print_path(ospec->path);
+			putchar(' ');
+			print_path(spec->path);
+			putchar('\n');
 
-				if (!oidcmp(&ospec->oid, &spec->oid) &&
-				    ospec->mode == spec->mode)
-					break;
-			}
+			if (!oidcmp(&ospec->oid, &spec->oid) &&
+			    ospec->mode == spec->mode)
+				break;
 			/* fallthrough */
 
 		case DIFF_STATUS_TYPE_CHANGED:
@@ -405,7 +392,6 @@ static void show_filemodify(struct diff_queue_struct *q,
 				       get_object_mark(object));
 			}
 			print_path(spec->path);
-			string_list_insert(changed, spec->path);
 			putchar('\n');
 			break;
 
@@ -541,8 +527,7 @@ static void anonymize_ident_line(const char **beg, const char **end)
 	*end = out->buf + out->len;
 }
 
-static void handle_commit(struct commit *commit, struct rev_info *rev,
-			  struct string_list *paths_of_changed_objects)
+static void handle_commit(struct commit *commit, struct rev_info *rev)
 {
 	int saved_output_format = rev->diffopt.output_format;
 	const char *commit_buffer;
@@ -629,7 +614,6 @@ static void handle_commit(struct commit *commit, struct rev_info *rev,
 	if (full_tree)
 		printf("deleteall\n");
 	log_tree_diff_flush(rev);
-	string_list_clear(paths_of_changed_objects, 0);
 	rev->diffopt.output_format = saved_output_format;
 
 	printf("\n");
@@ -645,15 +629,15 @@ static void *anonymize_tag(const void *old, size_t *len)
 	return strbuf_detach(&out, len);
 }
 
-static void handle_tail(struct object_array *commits, struct rev_info *revs,
-			struct string_list *paths_of_changed_objects)
+static void handle_tail(struct object_array *commits, struct rev_info *revs)
 {
 	struct commit *commit;
 	while (commits->nr) {
-		commit = (struct commit *)object_array_pop(commits);
+		commit = (struct commit *)commits->objects[commits->nr - 1].item;
 		if (has_unshown_parent(commit))
 			return;
-		handle_commit(commit, revs, paths_of_changed_objects);
+		handle_commit(commit, revs);
+		commits->nr--;
 	}
 }
 
@@ -682,7 +666,7 @@ static void handle_tag(const char *name, struct tag *tag)
 		return;
 	}
 
-	buf = read_object_file(&tag->object.oid, &type, &size);
+	buf = read_sha1_file(tag->object.oid.hash, &type, &size);
 	if (!buf)
 		die ("Could not read tag %s", oid_to_hex(&tag->object.oid));
 	message = memmem(buf, size, "\n\n", 2);
@@ -757,7 +741,7 @@ static void handle_tag(const char *name, struct tag *tag)
 			if (tagged->type != OBJ_COMMIT) {
 				die ("Tag %s tags unexported %s!",
 				     oid_to_hex(&tag->object.oid),
-				     type_name(tagged->type));
+				     typename(tagged->type));
 			}
 			p = (struct commit *)tagged;
 			for (;;) {
@@ -823,7 +807,7 @@ static void get_tags_and_duplicates(struct rev_cmdline_info *info)
 		if (e->flags & UNINTERESTING)
 			continue;
 
-		if (dwim_ref(e->name, strlen(e->name), &oid, &full_name) != 1)
+		if (dwim_ref(e->name, strlen(e->name), oid.hash, &full_name) != 1)
 			continue;
 
 		if (refspecs) {
@@ -839,7 +823,7 @@ static void get_tags_and_duplicates(struct rev_cmdline_info *info)
 		if (!commit) {
 			warning("%s: Unexpected object of type %s, skipping.",
 				e->name,
-				type_name(e->item->type));
+				typename(e->item->type));
 			continue;
 		}
 
@@ -851,7 +835,7 @@ static void get_tags_and_duplicates(struct rev_cmdline_info *info)
 			continue;
 		default: /* OBJ_TAG (nested tags) is already handled */
 			warning("Tag points to object of unexpected type %s, skipping.",
-				type_name(commit->object.type));
+				typename(commit->object.type));
 			continue;
 		}
 
@@ -895,7 +879,7 @@ static void export_marks(char *file)
 {
 	unsigned int i;
 	uint32_t mark;
-	struct decoration_entry *deco = idnums.entries;
+	struct object_decoration *deco = idnums.hash;
 	FILE *f;
 	int e = 0;
 
@@ -947,7 +931,7 @@ static void import_marks(char *input_file)
 		if (last_idnum < mark)
 			last_idnum = mark;
 
-		type = oid_object_info(&oid, NULL);
+		type = sha1_object_info(oid.hash, NULL);
 		if (type < 0)
 			die("object not found: %s", oid_to_hex(&oid));
 
@@ -992,7 +976,6 @@ int cmd_fast_export(int argc, const char **argv, const char *prefix)
 	char *export_filename = NULL, *import_filename = NULL;
 	uint32_t lastimportid;
 	struct string_list refspecs_list = STRING_LIST_INIT_NODUP;
-	struct string_list paths_of_changed_objects = STRING_LIST_INIT_DUP;
 	struct option options[] = {
 		OPT_INTEGER(0, "progress", &progress,
 			    N_("show progress after <n> objects")),
@@ -1065,15 +1048,14 @@ int cmd_fast_export(int argc, const char **argv, const char *prefix)
 	if (prepare_revision_walk(&revs))
 		die("revision walk setup failed");
 	revs.diffopt.format_callback = show_filemodify;
-	revs.diffopt.format_callback_data = &paths_of_changed_objects;
-	revs.diffopt.flags.recursive = 1;
+	DIFF_OPT_SET(&revs.diffopt, RECURSIVE);
 	while ((commit = get_revision(&revs))) {
 		if (has_unshown_parent(commit)) {
 			add_object_array(&commit->object, NULL, &commits);
 		}
 		else {
-			handle_commit(commit, &revs, &paths_of_changed_objects);
-			handle_tail(&commits, &revs, &paths_of_changed_objects);
+			handle_commit(commit, &revs);
+			handle_tail(&commits, &revs);
 		}
 	}
 

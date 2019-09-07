@@ -467,42 +467,21 @@ test_expect_success 'same, but with CR-LF line endings && cr-at-eol set' '
 	test_cmp one expect
 '
 
-test_expect_success 'CR-LF line endings && add line && text=auto' '
+test_expect_success 'same, but with CR-LF line endings && cr-at-eol unset' '
 	git config --unset core.whitespace &&
 	printf "a\r\n" >one &&
-	cp one save-one &&
-	git add one &&
 	printf "b\r\n" >>one &&
-	cp one expect &&
-	git diff -- one >patch &&
-	mv save-one one &&
-	echo "one text=auto" >.gitattributes &&
-	git apply patch &&
-	test_cmp one expect
-'
-
-test_expect_success 'CR-LF line endings && change line && text=auto' '
-	printf "a\r\n" >one &&
+	printf "c\r\n" >>one &&
 	cp one save-one &&
+	printf "                 \r\n" >>one &&
 	git add one &&
-	printf "b\r\n" >one &&
 	cp one expect &&
+	printf "d\r\n" >>one &&
 	git diff -- one >patch &&
 	mv save-one one &&
-	echo "one text=auto" >.gitattributes &&
-	git apply patch &&
-	test_cmp one expect
-'
+	echo d >>expect &&
 
-test_expect_success 'LF in repo, CRLF in worktree && change line && text=auto' '
-	printf "a\n" >one &&
-	git add one &&
-	printf "b\r\n" >one &&
-	git diff -- one >patch &&
-	printf "a\r\n" >one &&
-	echo "one text=auto" >.gitattributes &&
-	git -c core.eol=CRLF apply patch &&
-	printf "b\r\n" >expect &&
+	git apply --ignore-space-change --whitespace=fix patch &&
 	test_cmp one expect
 '
 

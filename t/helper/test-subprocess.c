@@ -1,8 +1,7 @@
-#include "test-tool.h"
 #include "cache.h"
 #include "run-command.h"
 
-int cmd__subprocess(int argc, const char **argv)
+int cmd_main(int argc, const char **argv)
 {
 	struct child_process cp = CHILD_PROCESS_INIT;
 	int nogit = 0;

@@ -488,7 +488,7 @@ static int read_ancestry(const char *graft_file)
 		return -1;
 	while (!strbuf_getwholeline(&buf, fp, '\n')) {
 		/* The format is just "Commit Parent1 Parent2 ...\n" */
-		struct commit_graft *graft = read_graft_line(&buf);
+		struct commit_graft *graft = read_graft_line(buf.buf, buf.len);
 		if (graft)
 			register_commit_graft(graft, 0);
 	}
@@ -499,7 +499,7 @@ static int read_ancestry(const char *graft_file)
 
 static int update_auto_abbrev(int auto_abbrev, struct blame_origin *suspect)
 {
-	const char *uniq = find_unique_abbrev(&suspect->commit->object.oid,
+	const char *uniq = find_unique_abbrev(suspect->commit->object.oid.hash,
 					      auto_abbrev);
 	int len = strlen(uniq);
 	if (auto_abbrev < len)
@@ -649,15 +649,6 @@ static int blame_move_callback(const struct option *option, const char *arg, int
 	return 0;
 }
 
-static int is_a_rev(const char *name)
-{
-	struct object_id oid;
-
-	if (get_oid(name, &oid))
-		return 0;
-	return OBJ_NONE < oid_object_info(&oid, NULL);
-}
-
 int cmd_blame(int argc, const char **argv, const char *prefix)
 {
 	struct rev_info revs;
@@ -717,8 +708,8 @@ int cmd_blame(int argc, const char **argv, const char *prefix)
 	git_config(git_blame_config, &output_option);
 	init_revisions(&revs, NULL);
 	revs.date_mode = blame_date_mode;
-	revs.diffopt.flags.allow_textconv = 1;
-	revs.diffopt.flags.follow_renames = 1;
+	DIFF_OPT_SET(&revs.diffopt, ALLOW_TEXTCONV);
+	DIFF_OPT_SET(&revs.diffopt, FOLLOW_RENAMES);
 
 	save_commit_buffer = 0;
 	dashdash_pos = 0;
@@ -729,7 +720,6 @@ int cmd_blame(int argc, const char **argv, const char *prefix)
 	for (;;) {
 		switch (parse_options_step(&ctx, options, blame_opt_usage)) {
 		case PARSE_OPT_HELP:
-		case PARSE_OPT_ERROR:
 			exit(129);
 		case PARSE_OPT_DONE:
 			if (ctx.argv[0])
@@ -744,9 +734,9 @@ int cmd_blame(int argc, const char **argv, const char *prefix)
 		parse_revision_opt(&revs, &ctx, options, blame_opt_usage);
 	}
 parse_done:
-	no_whole_file_rename = !revs.diffopt.flags.follow_renames;
+	no_whole_file_rename = !DIFF_OPT_TST(&revs.diffopt, FOLLOW_RENAMES);
 	xdl_opts |= revs.diffopt.xdl_opts & XDF_INDENT_HEURISTIC;
-	revs.diffopt.flags.follow_renames = 0;
+	DIFF_OPT_CLR(&revs.diffopt, FOLLOW_RENAMES);
 	argc = parse_options_end(&ctx);
 
 	if (incremental || (output_option & OUTPUT_PORCELAIN)) {
@@ -813,7 +803,7 @@ parse_done:
 	}
 	blame_date_width -= 1; /* strip the null */
 
-	if (revs.diffopt.flags.find_copies_harder)
+	if (DIFF_OPT_TST(&revs.diffopt, FIND_COPIES_HARDER))
 		opt |= (PICKAXE_BLAME_COPY | PICKAXE_BLAME_MOVE |
 			PICKAXE_BLAME_COPY_HARDER);
 
@@ -855,15 +845,16 @@ parse_done:
 	} else {
 		if (argc < 2)
 			usage_with_options(blame_opt_usage, options);
-		if (argc == 3 && is_a_rev(argv[argc - 1])) { /* (2b) */
+		path = add_prefix(prefix, argv[argc - 1]);
+		if (argc == 3 && !file_exists(path)) { /* (2b) */
 			path = add_prefix(prefix, argv[1]);
 			argv[1] = argv[2];
-		} else {	/* (2a) */
-			if (argc == 2 && is_a_rev(argv[1]) && !get_git_work_tree())
-				die("missing <path> to blame");
-			path = add_prefix(prefix, argv[argc - 1]);
 		}
 		argv[argc - 1] = "--";
+
+		setup_work_tree();
+		if (!file_exists(path))
+			die_errno("cannot stat path '%s'", path);
 	}
 
 	revs.disable_stdin = 1;
@@ -934,7 +925,8 @@ parse_done:
 	sb.found_guilty_entry = &found_guilty_entry;
 	sb.found_guilty_entry_data = &pi;
 	if (show_progress)
-		pi.progress = start_delayed_progress(_("Blaming lines"), sb.num_lines);
+		pi.progress = start_progress_delay(_("Blaming lines"),
+						   sb.num_lines, 50, 1);
 
 	assign_blame(&sb, opt);
 

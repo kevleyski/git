@@ -10,13 +10,13 @@
 
 static struct treeent {
 	unsigned mode;
-	struct object_id oid;
+	unsigned char sha1[20];
 	int len;
 	char name[FLEX_ARRAY];
 } **entries;
 static int alloc, used;
 
-static void append_to_tree(unsigned mode, struct object_id *oid, char *path)
+static void append_to_tree(unsigned mode, unsigned char *sha1, char *path)
 {
 	struct treeent *ent;
 	size_t len = strlen(path);
@@ -26,7 +26,7 @@ static void append_to_tree(unsigned mode, struct object_id *oid, char *path)
 	FLEX_ALLOC_MEM(ent, name, path, len);
 	ent->mode = mode;
 	ent->len = len;
-	oidcpy(&ent->oid, oid);
+	hashcpy(ent->sha1, sha1);
 
 	ALLOC_GROW(entries, used + 1, alloc);
 	entries[used++] = ent;
@@ -40,7 +40,7 @@ static int ent_compare(const void *a_, const void *b_)
 				 b->name, b->len, b->mode);
 }
 
-static void write_tree(struct object_id *oid)
+static void write_tree(unsigned char *sha1)
 {
 	struct strbuf buf;
 	size_t size;
@@ -54,10 +54,10 @@ static void write_tree(struct object_id *oid)
 	for (i = 0; i < used; i++) {
 		struct treeent *ent = entries[i];
 		strbuf_addf(&buf, "%o %s%c", ent->mode, ent->name, '\0');
-		strbuf_add(&buf, ent->oid.hash, the_hash_algo->rawsz);
+		strbuf_add(&buf, ent->sha1, 20);
 	}
 
-	write_object_file(buf.buf, buf.len, tree_type, oid);
+	write_sha1_file(buf.buf, buf.len, tree_type, sha1);
 	strbuf_release(&buf);
 }
 
@@ -69,12 +69,11 @@ static const char *mktree_usage[] = {
 static void mktree_line(char *buf, size_t len, int nul_term_line, int allow_missing)
 {
 	char *ptr, *ntr;
-	const char *p;
 	unsigned mode;
 	enum object_type mode_type; /* object type derived from mode */
 	enum object_type obj_type; /* object type derived from sha */
 	char *path, *to_free = NULL;
-	struct object_id oid;
+	unsigned char sha1[20];
 
 	ptr = buf;
 	/*
@@ -86,8 +85,9 @@ static void mktree_line(char *buf, size_t len, int nul_term_line, int allow_miss
 		die("input format error: %s", buf);
 	ptr = ntr + 1; /* type */
 	ntr = strchr(ptr, ' ');
-	if (!ntr || parse_oid_hex(ntr + 1, &oid, &p) ||
-	    *p != '\t')
+	if (!ntr || buf + len <= ntr + 40 ||
+	    ntr[41] != '\t' ||
+	    get_sha1_hex(ntr + 1, sha1))
 		die("input format error: %s", buf);
 
 	/* It is perfectly normal if we do not have a commit from a submodule */
@@ -112,16 +112,16 @@ static void mktree_line(char *buf, size_t len, int nul_term_line, int allow_miss
 	mode_type = object_type(mode);
 	if (mode_type != type_from_string(ptr)) {
 		die("entry '%s' object type (%s) doesn't match mode type (%s)",
-			path, ptr, type_name(mode_type));
+			path, ptr, typename(mode_type));
 	}
 
 	/* Check the type of object identified by sha1 */
-	obj_type = oid_object_info(&oid, NULL);
+	obj_type = sha1_object_info(sha1, NULL);
 	if (obj_type < 0) {
 		if (allow_missing) {
 			; /* no problem - missing objects are presumed to be of the right type */
 		} else {
-			die("entry '%s' object %s is unavailable", path, oid_to_hex(&oid));
+			die("entry '%s' object %s is unavailable", path, sha1_to_hex(sha1));
 		}
 	} else {
 		if (obj_type != mode_type) {
@@ -131,18 +131,18 @@ static void mktree_line(char *buf, size_t len, int nul_term_line, int allow_miss
 			 * because the new tree entry will never be correct.
 			 */
 			die("entry '%s' object %s is a %s but specified type was (%s)",
-				path, oid_to_hex(&oid), type_name(obj_type), type_name(mode_type));
+				path, sha1_to_hex(sha1), typename(obj_type), typename(mode_type));
 		}
 	}
 
-	append_to_tree(mode, &oid, path);
+	append_to_tree(mode, sha1, path);
 	free(to_free);
 }
 
 int cmd_mktree(int ac, const char **av, const char *prefix)
 {
 	struct strbuf sb = STRBUF_INIT;
-	struct object_id oid;
+	unsigned char sha1[20];
 	int nul_term_line = 0;
 	int allow_missing = 0;
 	int is_batch_mode = 0;
@@ -181,8 +181,8 @@ int cmd_mktree(int ac, const char **av, const char *prefix)
 			 */
 			; /* skip creating an empty tree */
 		} else {
-			write_tree(&oid);
-			puts(oid_to_hex(&oid));
+			write_tree(sha1);
+			puts(sha1_to_hex(sha1));
 			fflush(stdout);
 		}
 		used=0; /* reset tree entry buffer for re-use in batch mode */

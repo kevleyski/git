@@ -18,7 +18,8 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include "cache.h"
@@ -34,11 +35,11 @@ typedef void *SSL;
 #include "http.h"
 #endif
 
-#if defined(USE_CURL_FOR_IMAP_SEND)
-/* Always default to curl if it's available. */
+#if defined(USE_CURL_FOR_IMAP_SEND) && defined(NO_OPENSSL)
+/* only available option */
 #define USE_CURL_DEFAULT 1
 #else
-/* We don't have curl, so continue to use the historical implementation */
+/* strictly opt in */
 #define USE_CURL_DEFAULT 0
 #endif
 
@@ -683,7 +684,7 @@ static int parse_response_code(struct imap_store *ctx, struct imap_cmd_cb *cb,
 	struct imap *imap = ctx->imap;
 	char *arg, *p;
 
-	if (!s || *s != '[')
+	if (*s != '[')
 		return RESP_OK;		/* no response code */
 	s++;
 	if (!(p = strchr(s, ']'))) {
@@ -692,10 +693,6 @@ static int parse_response_code(struct imap_store *ctx, struct imap_cmd_cb *cb,
 	}
 	*p++ = 0;
 	arg = next_arg(&s);
-	if (!arg) {
-		fprintf(stderr, "IMAP error: empty response code\n");
-		return RESP_BAD;
-	}
 	if (!strcmp("UIDVALIDITY", arg)) {
 		if (!(arg = next_arg(&s)) || !(ctx->uidvalidity = atoi(arg))) {
 			fprintf(stderr, "IMAP error: malformed UIDVALIDITY status\n");
@@ -728,8 +725,7 @@ static int get_cmd_result(struct imap_store *ctx, struct imap_cmd *tcmd)
 {
 	struct imap *imap = ctx->imap;
 	struct imap_cmd *cmdp, **pcmdp;
-	char *cmd;
-	const char *arg, *arg1;
+	char *cmd, *arg, *arg1;
 	int n, resp, resp2, tag;
 
 	for (;;) {
@@ -737,10 +733,6 @@ static int get_cmd_result(struct imap_store *ctx, struct imap_cmd *tcmd)
 			return RESP_BAD;
 
 		arg = next_arg(&cmd);
-		if (!arg) {
-			fprintf(stderr, "IMAP error: empty response\n");
-			return RESP_BAD;
-		}
 		if (*arg == '*') {
 			arg = next_arg(&cmd);
 			if (!arg) {
@@ -815,8 +807,6 @@ static int get_cmd_result(struct imap_store *ctx, struct imap_cmd *tcmd)
 			if (cmdp->cb.cont || cmdp->cb.data)
 				imap->literal_pending = 0;
 			arg = next_arg(&cmd);
-			if (!arg)
-				arg = "";
 			if (!strcmp("OK", arg))
 				resp = DRV_OK;
 			else {
@@ -871,7 +861,7 @@ static char hexchar(unsigned int b)
 	return b < 10 ? '0' + b : 'a' + (b - 10);
 }
 
-#define ENCODED_SIZE(n) (4 * DIV_ROUND_UP((n), 3))
+#define ENCODED_SIZE(n) (4*((n+2)/3))
 static char *cram(const char *challenge_64, const char *user, const char *pass)
 {
 	int i, resp_len, encoded_len, decoded_len;
@@ -934,25 +924,6 @@ static int auth_cram_md5(struct imap_store *ctx, struct imap_cmd *cmd, const cha
 	free(response);
 
 	return 0;
-}
-
-static void server_fill_credential(struct imap_server_conf *srvc, struct credential *cred)
-{
-	if (srvc->user && srvc->pass)
-		return;
-
-	cred->protocol = xstrdup(srvc->use_ssl ? "imaps" : "imap");
-	cred->host = xstrdup(srvc->host);
-
-	cred->username = xstrdup_or_null(srvc->user);
-	cred->password = xstrdup_or_null(srvc->pass);
-
-	credential_fill(cred);
-
-	if (!srvc->user)
-		srvc->user = xstrdup(cred->username);
-	if (!srvc->pass)
-		srvc->pass = xstrdup(cred->password);
 }
 
 static struct imap_store *imap_open_store(struct imap_server_conf *srvc, char *folder)
@@ -1107,7 +1078,20 @@ static struct imap_store *imap_open_store(struct imap_server_conf *srvc, char *f
 		}
 #endif
 		imap_info("Logging in...\n");
-		server_fill_credential(srvc, &cred);
+		if (!srvc->user || !srvc->pass) {
+			cred.protocol = xstrdup(srvc->use_ssl ? "imaps" : "imap");
+			cred.host = xstrdup(srvc->host);
+
+			cred.username = xstrdup_or_null(srvc->user);
+			cred.password = xstrdup_or_null(srvc->pass);
+
+			credential_fill(&cred);
+
+			if (!srvc->user)
+				srvc->user = xstrdup(cred.username);
+			if (!srvc->pass)
+				srvc->pass = xstrdup(cred.password);
+		}
 
 		if (srvc->auth_method) {
 			struct imap_cmd_cb cb;
@@ -1189,11 +1173,11 @@ bail:
  */
 static void lf_to_crlf(struct strbuf *msg)
 {
-	char *new_msg;
+	char *new;
 	size_t i, j;
 	char lastc;
 
-	/* First pass: tally, in j, the size of the new_msg string: */
+	/* First pass: tally, in j, the size of the new string: */
 	for (i = j = 0, lastc = '\0'; i < msg->len; i++) {
 		if (msg->buf[i] == '\n' && lastc != '\r')
 			j++; /* a CR will need to be added here */
@@ -1201,18 +1185,18 @@ static void lf_to_crlf(struct strbuf *msg)
 		j++;
 	}
 
-	new_msg = xmallocz(j);
+	new = xmallocz(j);
 
 	/*
-	 * Second pass: write the new_msg string.  Note that this loop is
+	 * Second pass: write the new string.  Note that this loop is
 	 * otherwise identical to the first pass.
 	 */
 	for (i = j = 0, lastc = '\0'; i < msg->len; i++) {
 		if (msg->buf[i] == '\n' && lastc != '\r')
-			new_msg[j++] = '\r';
-		lastc = new_msg[j++] = msg->buf[i];
+			new[j++] = '\r';
+		lastc = new[j++] = msg->buf[i];
 	}
-	strbuf_attach(msg, new_msg, j, j + 1);
+	strbuf_attach(msg, new, j, j + 1);
 }
 
 /*
@@ -1408,11 +1392,10 @@ static int append_msgs_to_imap(struct imap_server_conf *server,
 }
 
 #ifdef USE_CURL_FOR_IMAP_SEND
-static CURL *setup_curl(struct imap_server_conf *srvc, struct credential *cred)
+static CURL *setup_curl(struct imap_server_conf *srvc)
 {
 	CURL *curl;
 	struct strbuf path = STRBUF_INIT;
-	char *uri_encoded_folder;
 
 	if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK)
 		die("curl_global_init failed");
@@ -1422,7 +1405,6 @@ static CURL *setup_curl(struct imap_server_conf *srvc, struct credential *cred)
 	if (!curl)
 		die("curl_easy_init failed");
 
-	server_fill_credential(&server, cred);
 	curl_easy_setopt(curl, CURLOPT_USERNAME, server.user);
 	curl_easy_setopt(curl, CURLOPT_PASSWORD, server.pass);
 
@@ -1430,12 +1412,7 @@ static CURL *setup_curl(struct imap_server_conf *srvc, struct credential *cred)
 	strbuf_addstr(&path, server.host);
 	if (!path.len || path.buf[path.len - 1] != '/')
 		strbuf_addch(&path, '/');
-
-	uri_encoded_folder = curl_easy_escape(curl, server.folder, 0);
-	if (!uri_encoded_folder)
-		die("failed to encode server folder");
-	strbuf_addstr(&path, uri_encoded_folder);
-	curl_free(uri_encoded_folder);
+	strbuf_addstr(&path, server.folder);
 
 	curl_easy_setopt(curl, CURLOPT_URL, path.buf);
 	strbuf_release(&path);
@@ -1477,9 +1454,8 @@ static int curl_append_msgs_to_imap(struct imap_server_conf *server,
 	struct buffer msgbuf = { STRBUF_INIT, 0 };
 	CURL *curl;
 	CURLcode res = CURLE_OK;
-	struct credential cred = CREDENTIAL_INIT;
 
-	curl = setup_curl(server, &cred);
+	curl = setup_curl(server);
 	curl_easy_setopt(curl, CURLOPT_READDATA, &msgbuf);
 
 	fprintf(stderr, "sending %d message%s\n", total, (total != 1) ? "s" : "");
@@ -1514,20 +1490,7 @@ static int curl_append_msgs_to_imap(struct imap_server_conf *server,
 	curl_easy_cleanup(curl);
 	curl_global_cleanup();
 
-	if (cred.username) {
-		if (res == CURLE_OK)
-			credential_approve(&cred);
-#if LIBCURL_VERSION_NUM >= 0x070d01
-		else if (res == CURLE_LOGIN_DENIED)
-#else
-		else
-#endif
-			credential_reject(&cred);
-	}
-
-	credential_clear(&cred);
-
-	return res != CURLE_OK;
+	return 0;
 }
 #endif
 

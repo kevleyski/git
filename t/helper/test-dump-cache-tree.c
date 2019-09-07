@@ -1,4 +1,3 @@
-#include "test-tool.h"
 #include "cache.h"
 #include "tree.h"
 #include "cache-tree.h"
@@ -55,7 +54,7 @@ static int dump_cache_tree(struct cache_tree *it,
 	return errs;
 }
 
-int cmd__dump_cache_tree(int ac, const char **av)
+int cmd_main(int ac, const char **av)
 {
 	struct index_state istate;
 	struct cache_tree *another = cache_tree();

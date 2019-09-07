@@ -60,7 +60,7 @@ static void *result(struct merge_list *entry, unsigned long *size)
 	const char *path = entry->path;
 
 	if (!entry->stage)
-		return read_object_file(&entry->blob->object.oid, &type, size);
+		return read_sha1_file(entry->blob->object.oid.hash, &type, size);
 	base = NULL;
 	if (entry->stage == 1) {
 		base = entry->blob;
@@ -82,8 +82,7 @@ static void *origin(struct merge_list *entry, unsigned long *size)
 	enum object_type type;
 	while (entry) {
 		if (entry->stage == 2)
-			return read_object_file(&entry->blob->object.oid,
-						&type, size);
+			return read_sha1_file(entry->blob->object.oid.hash, &type, size);
 		entry = entry->link;
 	}
 	return NULL;
@@ -214,11 +213,11 @@ static void unresolved_directory(const struct traverse_info *info,
 
 	newbase = traverse_path(info, p);
 
-#define ENTRY_OID(e) (((e)->mode && S_ISDIR((e)->mode)) ? (e)->oid : NULL)
-	buf0 = fill_tree_descriptor(t + 0, ENTRY_OID(n + 0));
-	buf1 = fill_tree_descriptor(t + 1, ENTRY_OID(n + 1));
-	buf2 = fill_tree_descriptor(t + 2, ENTRY_OID(n + 2));
-#undef ENTRY_OID
+#define ENTRY_SHA1(e) (((e)->mode && S_ISDIR((e)->mode)) ? (e)->oid->hash : NULL)
+	buf0 = fill_tree_descriptor(t+0, ENTRY_SHA1(n + 0));
+	buf1 = fill_tree_descriptor(t+1, ENTRY_SHA1(n + 1));
+	buf2 = fill_tree_descriptor(t+2, ENTRY_SHA1(n + 2));
+#undef ENTRY_SHA1
 
 	merge_trees(t, newbase);
 
@@ -348,12 +347,12 @@ static void merge_trees(struct tree_desc t[3], const char *base)
 
 static void *get_tree_descriptor(struct tree_desc *desc, const char *rev)
 {
-	struct object_id oid;
+	unsigned char sha1[20];
 	void *buf;
 
-	if (get_oid(rev, &oid))
+	if (get_sha1(rev, sha1))
 		die("unknown rev %s", rev);
-	buf = fill_tree_descriptor(desc, &oid);
+	buf = fill_tree_descriptor(desc, sha1);
 	if (!buf)
 		die("%s is not a tree", rev);
 	return buf;

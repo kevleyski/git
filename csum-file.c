@@ -11,7 +11,7 @@
 #include "progress.h"
 #include "csum-file.h"
 
-static void flush(struct hashfile *f, const void *buf, unsigned int count)
+static void flush(struct sha1file *f, const void *buf, unsigned int count)
 {
 	if (0 <= f->check_fd && count)  {
 		unsigned char check_buffer[8192];
@@ -19,7 +19,7 @@ static void flush(struct hashfile *f, const void *buf, unsigned int count)
 
 		if (ret < 0)
 			die_errno("%s: sha1 file read error", f->name);
-		if (ret != count)
+		if (ret < count)
 			die("%s: sha1 file truncated", f->name);
 		if (memcmp(buf, check_buffer, count))
 			die("sha1 file '%s' validation error", f->name);
@@ -42,28 +42,28 @@ static void flush(struct hashfile *f, const void *buf, unsigned int count)
 	}
 }
 
-void hashflush(struct hashfile *f)
+void sha1flush(struct sha1file *f)
 {
 	unsigned offset = f->offset;
 
 	if (offset) {
-		the_hash_algo->update_fn(&f->ctx, f->buffer, offset);
+		git_SHA1_Update(&f->ctx, f->buffer, offset);
 		flush(f, f->buffer, offset);
 		f->offset = 0;
 	}
 }
 
-int hashclose(struct hashfile *f, unsigned char *result, unsigned int flags)
+int sha1close(struct sha1file *f, unsigned char *result, unsigned int flags)
 {
 	int fd;
 
-	hashflush(f);
-	the_hash_algo->final_fn(f->buffer, &f->ctx);
+	sha1flush(f);
+	git_SHA1_Final(f->buffer, &f->ctx);
 	if (result)
 		hashcpy(result, f->buffer);
 	if (flags & (CSUM_CLOSE | CSUM_FSYNC)) {
 		/* write checksum and close fd */
-		flush(f, f->buffer, the_hash_algo->rawsz);
+		flush(f, f->buffer, 20);
 		if (flags & CSUM_FSYNC)
 			fsync_or_die(f->fd, f->name);
 		if (close(f->fd))
@@ -86,7 +86,7 @@ int hashclose(struct hashfile *f, unsigned char *result, unsigned int flags)
 	return fd;
 }
 
-void hashwrite(struct hashfile *f, const void *buf, unsigned int count)
+void sha1write(struct sha1file *f, const void *buf, unsigned int count)
 {
 	while (count) {
 		unsigned offset = f->offset;
@@ -110,7 +110,7 @@ void hashwrite(struct hashfile *f, const void *buf, unsigned int count)
 		buf = (char *) buf + nr;
 		left -= nr;
 		if (!left) {
-			the_hash_algo->update_fn(&f->ctx, data, offset);
+			git_SHA1_Update(&f->ctx, data, offset);
 			flush(f, data, offset);
 			offset = 0;
 		}
@@ -118,15 +118,15 @@ void hashwrite(struct hashfile *f, const void *buf, unsigned int count)
 	}
 }
 
-struct hashfile *hashfd(int fd, const char *name)
+struct sha1file *sha1fd(int fd, const char *name)
 {
-	return hashfd_throughput(fd, name, NULL);
+	return sha1fd_throughput(fd, name, NULL);
 }
 
-struct hashfile *hashfd_check(const char *name)
+struct sha1file *sha1fd_check(const char *name)
 {
 	int sink, check;
-	struct hashfile *f;
+	struct sha1file *f;
 
 	sink = open("/dev/null", O_WRONLY);
 	if (sink < 0)
@@ -134,14 +134,14 @@ struct hashfile *hashfd_check(const char *name)
 	check = open(name, O_RDONLY);
 	if (check < 0)
 		die_errno("unable to open '%s'", name);
-	f = hashfd(sink, name);
+	f = sha1fd(sink, name);
 	f->check_fd = check;
 	return f;
 }
 
-struct hashfile *hashfd_throughput(int fd, const char *name, struct progress *tp)
+struct sha1file *sha1fd_throughput(int fd, const char *name, struct progress *tp)
 {
-	struct hashfile *f = xmalloc(sizeof(*f));
+	struct sha1file *f = xmalloc(sizeof(*f));
 	f->fd = fd;
 	f->check_fd = -1;
 	f->offset = 0;
@@ -149,18 +149,18 @@ struct hashfile *hashfd_throughput(int fd, const char *name, struct progress *tp
 	f->tp = tp;
 	f->name = name;
 	f->do_crc = 0;
-	the_hash_algo->init_fn(&f->ctx);
+	git_SHA1_Init(&f->ctx);
 	return f;
 }
 
-void hashfile_checkpoint(struct hashfile *f, struct hashfile_checkpoint *checkpoint)
+void sha1file_checkpoint(struct sha1file *f, struct sha1file_checkpoint *checkpoint)
 {
-	hashflush(f);
+	sha1flush(f);
 	checkpoint->offset = f->total;
 	checkpoint->ctx = f->ctx;
 }
 
-int hashfile_truncate(struct hashfile *f, struct hashfile_checkpoint *checkpoint)
+int sha1file_truncate(struct sha1file *f, struct sha1file_checkpoint *checkpoint)
 {
 	off_t offset = checkpoint->offset;
 
@@ -169,17 +169,17 @@ int hashfile_truncate(struct hashfile *f, struct hashfile_checkpoint *checkpoint
 		return -1;
 	f->total = offset;
 	f->ctx = checkpoint->ctx;
-	f->offset = 0; /* hashflush() was called in checkpoint */
+	f->offset = 0; /* sha1flush() was called in checkpoint */
 	return 0;
 }
 
-void crc32_begin(struct hashfile *f)
+void crc32_begin(struct sha1file *f)
 {
 	f->crc32 = crc32(0, NULL, 0);
 	f->do_crc = 1;
 }
 
-uint32_t crc32_end(struct hashfile *f)
+uint32_t crc32_end(struct sha1file *f)
 {
 	f->do_crc = 0;
 	return f->crc32;

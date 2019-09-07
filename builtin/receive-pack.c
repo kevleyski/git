@@ -1,5 +1,4 @@
 #include "builtin.h"
-#include "repository.h"
 #include "config.h"
 #include "lockfile.h"
 #include "pack.h"
@@ -24,8 +23,6 @@
 #include "fsck.h"
 #include "tmp-objdir.h"
 #include "oidset.h"
-#include "packfile.h"
-#include "protocol.h"
 
 static const char * const receive_pack_usage[] = {
 	N_("git receive-pack <git-dir>"),
@@ -70,7 +67,7 @@ static int sent_capabilities;
 static int shallow_update;
 static const char *alt_shallow_file;
 static struct strbuf push_cert = STRBUF_INIT;
-static struct object_id push_cert_oid;
+static unsigned char push_cert_sha1[20];
 static struct signature_check sigcheck;
 static const char *push_cert_nonce;
 static const char *cert_nonce_seed;
@@ -634,9 +631,8 @@ static void prepare_push_cert_sha1(struct child_process *proc)
 		int bogs /* beginning_of_gpg_sig */;
 
 		already_done = 1;
-		if (write_object_file(push_cert.buf, push_cert.len, "blob",
-				      &push_cert_oid))
-			oidclr(&push_cert_oid);
+		if (write_sha1_file(push_cert.buf, push_cert.len, "blob", push_cert_sha1))
+			hashclr(push_cert_sha1);
 
 		memset(&sigcheck, '\0', sizeof(sigcheck));
 		sigcheck.result = 'N';
@@ -657,9 +653,9 @@ static void prepare_push_cert_sha1(struct child_process *proc)
 		strbuf_release(&gpg_status);
 		nonce_status = check_nonce(push_cert.buf, bogs);
 	}
-	if (!is_null_oid(&push_cert_oid)) {
+	if (!is_null_sha1(push_cert_sha1)) {
 		argv_array_pushf(&proc->env_array, "GIT_PUSH_CERT=%s",
-				 oid_to_hex(&push_cert_oid));
+				 sha1_to_hex(push_cert_sha1));
 		argv_array_pushf(&proc->env_array, "GIT_PUSH_CERT_SIGNER=%s",
 				 sigcheck.signer ? sigcheck.signer : "");
 		argv_array_pushf(&proc->env_array, "GIT_PUSH_CERT_KEY=%s",
@@ -746,7 +742,7 @@ static int run_and_feed_hook(const char *hook_name, feed_fn feed,
 		size_t n;
 		if (feed(feed_state, &buf, &n))
 			break;
-		if (write_in_full(proc.in, buf, n) < 0)
+		if (write_in_full(proc.in, buf, n) != n)
 			break;
 	}
 	close(proc.in);
@@ -873,7 +869,7 @@ static void refuse_unconfigured_deny_delete_current(void)
 	rp_error("%s", _(refuse_unconfigured_deny_delete_current_msg));
 }
 
-static int command_singleton_iterator(void *cb_data, struct object_id *oid);
+static int command_singleton_iterator(void *cb_data, unsigned char sha1[20]);
 static int update_shallow_ref(struct command *cmd, struct shallow_info *si)
 {
 	static struct lock_file shallow_lock;
@@ -923,9 +919,9 @@ static int update_shallow_ref(struct command *cmd, struct shallow_info *si)
  */
 static int head_has_history(void)
 {
-	struct object_id oid;
+	unsigned char sha1[20];
 
-	return !get_oid("HEAD", &oid);
+	return !get_sha1("HEAD", sha1);
 }
 
 static const char *push_to_deploy(unsigned char *sha1,
@@ -1142,7 +1138,7 @@ static const char *update(struct command *cmd, struct shallow_info *si)
 		}
 		if (ref_transaction_delete(transaction,
 					   namespaced_name,
-					   old_oid,
+					   old_oid->hash,
 					   0, "push", &err)) {
 			rp_error("%s", err.buf);
 			strbuf_release(&err);
@@ -1159,7 +1155,7 @@ static const char *update(struct command *cmd, struct shallow_info *si)
 
 		if (ref_transaction_update(transaction,
 					   namespaced_name,
-					   new_oid, old_oid,
+					   new_oid->hash, old_oid->hash,
 					   0, "push",
 					   &err)) {
 			rp_error("%s", err.buf);
@@ -1210,10 +1206,11 @@ static void check_aliased_update(struct command *cmd, struct string_list *list)
 	const char *dst_name;
 	struct string_list_item *item;
 	struct command *dst_cmd;
+	unsigned char sha1[GIT_MAX_RAWSZ];
 	int flag;
 
 	strbuf_addf(&buf, "%s%s", get_git_namespace(), cmd->ref_name);
-	dst_name = resolve_ref_unsafe(buf.buf, 0, NULL, &flag);
+	dst_name = resolve_ref_unsafe(buf.buf, 0, sha1, &flag);
 	strbuf_release(&buf);
 
 	if (!(flag & REF_ISSYMREF))
@@ -1243,11 +1240,11 @@ static void check_aliased_update(struct command *cmd, struct string_list *list)
 	rp_error("refusing inconsistent update between symref '%s' (%s..%s) and"
 		 " its target '%s' (%s..%s)",
 		 cmd->ref_name,
-		 find_unique_abbrev(&cmd->old_oid, DEFAULT_ABBREV),
-		 find_unique_abbrev(&cmd->new_oid, DEFAULT_ABBREV),
+		 find_unique_abbrev(cmd->old_oid.hash, DEFAULT_ABBREV),
+		 find_unique_abbrev(cmd->new_oid.hash, DEFAULT_ABBREV),
 		 dst_cmd->ref_name,
-		 find_unique_abbrev(&dst_cmd->old_oid, DEFAULT_ABBREV),
-		 find_unique_abbrev(&dst_cmd->new_oid, DEFAULT_ABBREV));
+		 find_unique_abbrev(dst_cmd->old_oid.hash, DEFAULT_ABBREV),
+		 find_unique_abbrev(dst_cmd->new_oid.hash, DEFAULT_ABBREV));
 
 	cmd->error_string = dst_cmd->error_string =
 		"inconsistent aliased update";
@@ -1273,7 +1270,7 @@ static void check_aliased_updates(struct command *commands)
 	string_list_clear(&ref_list, 0);
 }
 
-static int command_singleton_iterator(void *cb_data, struct object_id *oid)
+static int command_singleton_iterator(void *cb_data, unsigned char sha1[20])
 {
 	struct command **cmd_list = cb_data;
 	struct command *cmd = *cmd_list;
@@ -1281,7 +1278,7 @@ static int command_singleton_iterator(void *cb_data, struct object_id *oid)
 	if (!cmd || is_null_oid(&cmd->new_oid))
 		return -1; /* end of list */
 	*cmd_list = NULL; /* this returns only one */
-	oidcpy(oid, &cmd->new_oid);
+	hashcpy(sha1, cmd->new_oid.hash);
 	return 0;
 }
 
@@ -1312,7 +1309,7 @@ struct iterate_data {
 	struct shallow_info *si;
 };
 
-static int iterate_receive_command_list(void *cb_data, struct object_id *oid)
+static int iterate_receive_command_list(void *cb_data, unsigned char sha1[20])
 {
 	struct iterate_data *data = cb_data;
 	struct command **cmd_list = &data->cmds;
@@ -1323,7 +1320,7 @@ static int iterate_receive_command_list(void *cb_data, struct object_id *oid)
 			/* to be checked in update_shallow_ref() */
 			continue;
 		if (!is_null_oid(&cmd->new_oid) && !cmd->skip_update) {
-			oidcpy(oid, &cmd->new_oid);
+			hashcpy(sha1, cmd->new_oid.hash);
 			*cmd_list = cmd->next;
 			return 0;
 		}
@@ -1461,6 +1458,7 @@ static void execute_commands(struct command *commands,
 {
 	struct check_connected_options opt = CHECK_CONNECTED_INIT;
 	struct command *cmd;
+	struct object_id oid;
 	struct iterate_data data;
 	struct async muxer;
 	int err_fd = 0;
@@ -1517,7 +1515,7 @@ static void execute_commands(struct command *commands,
 	check_aliased_updates(commands);
 
 	free(head_name_to_free);
-	head_name = head_name_to_free = resolve_refdup("HEAD", 0, NULL, NULL);
+	head_name = head_name_to_free = resolve_refdup("HEAD", 0, oid.hash, NULL);
 
 	if (use_atomic)
 		execute_commands_atomic(commands, si);
@@ -1779,7 +1777,7 @@ static const char *unpack(int err_fd, struct shallow_info *si)
 		status = finish_command(&child);
 		if (status)
 			return "index-pack abnormal exit";
-		reprepare_packed_git(the_repository);
+		reprepare_packed_git();
 	}
 	return NULL;
 }
@@ -1808,7 +1806,7 @@ static const char *unpack_with_sideband(struct shallow_info *si)
 static void prepare_shallow_update(struct command *commands,
 				   struct shallow_info *si)
 {
-	int i, j, k, bitmap_size = DIV_ROUND_UP(si->ref->nr, 32);
+	int i, j, k, bitmap_size = (si->ref->nr + 31) / 32;
 
 	ALLOC_ARRAY(si->used_shallow, si->shallow->nr);
 	assign_shallow_commits_to_refs(si, si->used_shallow, NULL);
@@ -1964,22 +1962,6 @@ int cmd_receive_pack(int argc, const char **argv, const char *prefix)
 	else if (0 <= receive_unpack_limit)
 		unpack_limit = receive_unpack_limit;
 
-	switch (determine_protocol_version_server()) {
-	case protocol_v1:
-		/*
-		 * v1 is just the original protocol with a version string,
-		 * so just fall through after writing the version string.
-		 */
-		if (advertise_refs || !stateless_rpc)
-			packet_write_fmt(1, "version 1\n");
-
-		/* fallthrough */
-	case protocol_v0:
-		break;
-	case protocol_unknown_version:
-		BUG("unknown protocol version");
-	}
-
 	if (advertise_refs || !stateless_rpc) {
 		write_head_info();
 	}
@@ -2028,7 +2010,7 @@ int cmd_receive_pack(int argc, const char **argv, const char *prefix)
 			proc.git_cmd = 1;
 			proc.argv = argv_gc_auto;
 
-			close_all_packs(the_repository->objects);
+			close_all_packs();
 			if (!start_command(&proc)) {
 				if (use_sideband)
 					copy_to_sideband(proc.err, -1, NULL);

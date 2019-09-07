@@ -7,9 +7,6 @@
 */
 
 #include "builtin.h"
-#include "repository.h"
-#include "packfile.h"
-#include "object-store.h"
 
 #define BLKSIZE 512
 
@@ -50,17 +47,17 @@ static inline void llist_item_put(struct llist_item *item)
 
 static inline struct llist_item *llist_item_get(void)
 {
-	struct llist_item *new_item;
+	struct llist_item *new;
 	if ( free_nodes ) {
-		new_item = free_nodes;
+		new = free_nodes;
 		free_nodes = free_nodes->next;
 	} else {
 		int i = 1;
-		ALLOC_ARRAY(new_item, BLKSIZE);
+		ALLOC_ARRAY(new, BLKSIZE);
 		for (; i < BLKSIZE; i++)
-			llist_item_put(&new_item[i]);
+			llist_item_put(&new[i]);
 	}
-	return new_item;
+	return new;
 }
 
 static void llist_free(struct llist *list)
@@ -82,26 +79,26 @@ static inline void llist_init(struct llist **list)
 static struct llist * llist_copy(struct llist *list)
 {
 	struct llist *ret;
-	struct llist_item *new_item, *old_item, *prev;
+	struct llist_item *new, *old, *prev;
 
 	llist_init(&ret);
 
 	if ((ret->size = list->size) == 0)
 		return ret;
 
-	new_item = ret->front = llist_item_get();
-	new_item->sha1 = list->front->sha1;
+	new = ret->front = llist_item_get();
+	new->sha1 = list->front->sha1;
 
-	old_item = list->front->next;
-	while (old_item) {
-		prev = new_item;
-		new_item = llist_item_get();
-		prev->next = new_item;
-		new_item->sha1 = old_item->sha1;
-		old_item = old_item->next;
+	old = list->front->next;
+	while (old) {
+		prev = new;
+		new = llist_item_get();
+		prev->next = new;
+		new->sha1 = old->sha1;
+		old = old->next;
 	}
-	new_item->next = NULL;
-	ret->back = new_item;
+	new->next = NULL;
+	ret->back = new;
 
 	return ret;
 }
@@ -110,24 +107,24 @@ static inline struct llist_item *llist_insert(struct llist *list,
 					      struct llist_item *after,
 					       const unsigned char *sha1)
 {
-	struct llist_item *new_item = llist_item_get();
-	new_item->sha1 = sha1;
-	new_item->next = NULL;
+	struct llist_item *new = llist_item_get();
+	new->sha1 = sha1;
+	new->next = NULL;
 
 	if (after != NULL) {
-		new_item->next = after->next;
-		after->next = new_item;
+		new->next = after->next;
+		after->next = new;
 		if (after == list->back)
-			list->back = new_item;
+			list->back = new;
 	} else {/* insert in front */
 		if (list->size == 0)
-			list->back = new_item;
+			list->back = new;
 		else
-			new_item->next = list->front;
-		list->front = new_item;
+			new->next = list->front;
+		list->front = new;
 	}
 	list->size++;
-	return new_item;
+	return new;
 }
 
 static inline struct llist_item *llist_insert_back(struct llist *list,
@@ -573,7 +570,7 @@ static struct pack_list * add_pack(struct packed_git *p)
 
 static struct pack_list * add_pack_file(const char *filename)
 {
-	struct packed_git *p = get_packed_git(the_repository);
+	struct packed_git *p = packed_git;
 
 	if (strlen(filename) < 40)
 		die("Bad pack filename: %s", filename);
@@ -588,7 +585,7 @@ static struct pack_list * add_pack_file(const char *filename)
 
 static void load_all(void)
 {
-	struct packed_git *p = get_packed_git(the_repository);
+	struct packed_git *p = packed_git;
 
 	while (p) {
 		add_pack(p);
@@ -630,6 +627,8 @@ int cmd_pack_redundant(int argc, const char **argv, const char *prefix)
 		else
 			break;
 	}
+
+	prepare_packed_git();
 
 	if (load_all_packs)
 		load_all();

@@ -155,8 +155,6 @@ static int run_sequencer(int argc, const char **argv, struct replay_opts *opts)
 				"--strategy-option", opts->xopts ? 1 : 0,
 				"-x", opts->record_origin,
 				"--ff", opts->allow_ff,
-				"--rerere-autoupdate", opts->allow_rerere_auto == RERERE_AUTOUPDATE,
-				"--no-rerere-autoupdate", opts->allow_rerere_auto == RERERE_NOAUTOUPDATE,
 				NULL);
 	}
 
@@ -208,7 +206,7 @@ int cmd_revert(int argc, const char **argv, const char *prefix)
 	if (isatty(0))
 		opts.edit = 1;
 	opts.action = REPLAY_REVERT;
-	sequencer_init_config(&opts);
+	git_config(git_default_config, NULL);
 	res = run_sequencer(argc, argv, &opts);
 	if (res < 0)
 		die(_("revert failed"));
@@ -221,7 +219,7 @@ int cmd_cherry_pick(int argc, const char **argv, const char *prefix)
 	int res;
 
 	opts.action = REPLAY_PICK;
-	sequencer_init_config(&opts);
+	git_config(git_default_config, NULL);
 	res = run_sequencer(argc, argv, &opts);
 	if (res < 0)
 		die(_("cherry-pick failed"));

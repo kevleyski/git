@@ -5,29 +5,28 @@
  *
  * The mtime can be changed to an absolute value:
  *
- *	test-tool chmtime =<seconds> file...
+ *	test-chmtime =<seconds> file...
  *
  * Relative to the current time as returned by time(3):
  *
- *	test-tool chmtime =+<seconds> (or =-<seconds>) file...
+ *	test-chmtime =+<seconds> (or =-<seconds>) file...
  *
  * Or relative to the current mtime of the file:
  *
- *	test-tool chmtime <seconds> file...
- *	test-tool chmtime +<seconds> (or -<seconds>) file...
+ *	test-chmtime <seconds> file...
+ *	test-chmtime +<seconds> (or -<seconds>) file...
  *
  * Examples:
  *
  * To just print the mtime use --verbose and set the file mtime offset to 0:
  *
- *	test-tool chmtime -v +0 file
+ *	test-chmtime -v +0 file
  *
  * To set the mtime to current time:
  *
- *	test-tool chmtime =+0 file
+ *	test-chmtime =+0 file
  *
  */
-#include "test-tool.h"
 #include "git-compat-util.h"
 #include <utime.h>
 
@@ -57,7 +56,7 @@ static int timespec_arg(const char *arg, long int *set_time, int *set_eq)
 	return 1;
 }
 
-int cmd__chmtime(int argc, const char **argv)
+int cmd_main(int argc, const char **argv)
 {
 	static int verbose;
 

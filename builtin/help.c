@@ -131,7 +131,6 @@ static void exec_woman_emacs(const char *path, const char *page)
 		strbuf_addf(&man_page, "(woman \"%s\")", page);
 		execlp(path, "emacsclient", "-e", man_page.buf, (char *)NULL);
 		warning_errno(_("failed to exec '%s'"), path);
-		strbuf_release(&man_page);
 	}
 }
 
@@ -153,7 +152,6 @@ static void exec_man_konqueror(const char *path, const char *page)
 		strbuf_addf(&man_page, "man:%s(1)", page);
 		execlp(path, filename, "newTab", man_page.buf, (char *)NULL);
 		warning_errno(_("failed to exec '%s'"), path);
-		strbuf_release(&man_page);
 	}
 }
 
@@ -171,7 +169,6 @@ static void exec_man_cmd(const char *cmd, const char *page)
 	strbuf_addf(&shell_cmd, "%s %s", cmd, page);
 	execl(SHELL_PATH, SHELL_PATH, "-c", shell_cmd.buf, (char *)NULL);
 	warning(_("failed to exec '%s'"), cmd);
-	strbuf_release(&shell_cmd);
 }
 
 static void add_man_viewer(const char *name)
@@ -194,11 +191,11 @@ static void do_add_man_viewer_info(const char *name,
 				   size_t len,
 				   const char *value)
 {
-	struct man_viewer_info_list *new_man_viewer;
-	FLEX_ALLOC_MEM(new_man_viewer, name, name, len);
-	new_man_viewer->info = xstrdup(value);
-	new_man_viewer->next = man_viewer_info_list;
-	man_viewer_info_list = new_man_viewer;
+	struct man_viewer_info_list *new;
+	FLEX_ALLOC_MEM(new, name, name, len);
+	new->info = xstrdup(value);
+	new->next = man_viewer_info_list;
+	man_viewer_info_list = new;
 }
 
 static int add_man_viewer_path(const char *name,
@@ -441,7 +438,7 @@ static const char *check_git_cmd(const char* cmd)
 
 	alias = alias_lookup(cmd);
 	if (alias) {
-		printf_ln(_("'%s' is aliased to '%s'"), cmd, alias);
+		printf_ln(_("`git %s' is aliased to `%s'"), cmd, alias);
 		free(alias);
 		exit(0);
 	}

@@ -1,4 +1,3 @@
-#include "test-tool.h"
 #include "cache.h"
 #include "mergesort.h"
 
@@ -23,7 +22,7 @@ static int compare_strings(const void *a, const void *b)
 	return strcmp(x->text, y->text);
 }
 
-int cmd__mergesort(int argc, const char **argv)
+int cmd_main(int argc, const char **argv)
 {
 	struct line *line, *p = NULL, *lines = NULL;
 	struct strbuf sb = STRBUF_INIT;

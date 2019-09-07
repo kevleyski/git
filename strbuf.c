@@ -11,28 +11,6 @@ int starts_with(const char *str, const char *prefix)
 			return 0;
 }
 
-int skip_to_optional_arg_default(const char *str, const char *prefix,
-				 const char **arg, const char *def)
-{
-	const char *p;
-
-	if (!skip_prefix(str, prefix, &p))
-		return 0;
-
-	if (!*p) {
-		if (arg)
-			*arg = def;
-		return 1;
-	}
-
-	if (*p != '=')
-		return 0;
-
-	if (arg)
-		*arg = p + 1;
-	return 1;
-}
-
 /*
  * Used as the default ->buf value, so that people can always assume
  * buf is non NULL and ->buf is NUL terminated even for a freshly
@@ -95,17 +73,9 @@ void strbuf_trim(struct strbuf *sb)
 	strbuf_rtrim(sb);
 	strbuf_ltrim(sb);
 }
-
 void strbuf_rtrim(struct strbuf *sb)
 {
 	while (sb->len > 0 && isspace((unsigned char)sb->buf[sb->len - 1]))
-		sb->len--;
-	sb->buf[sb->len] = '\0';
-}
-
-void strbuf_trim_trailing_dir_sep(struct strbuf *sb)
-{
-	while (sb->len > 0 && is_dir_sep((unsigned char)sb->buf[sb->len - 1]))
 		sb->len--;
 	sb->buf[sb->len] = '\0';
 }
@@ -416,15 +386,12 @@ ssize_t strbuf_read(struct strbuf *sb, int fd, size_t hint)
 
 ssize_t strbuf_read_once(struct strbuf *sb, int fd, size_t hint)
 {
-	size_t oldalloc = sb->alloc;
 	ssize_t cnt;
 
 	strbuf_grow(sb, hint ? hint : 8192);
 	cnt = xread(fd, sb->buf + sb->len, sb->alloc - sb->len - 1);
 	if (cnt > 0)
 		strbuf_setlen(sb, sb->len + cnt);
-	else if (oldalloc == 0)
-		strbuf_release(sb);
 	return cnt;
 }
 
@@ -509,7 +476,6 @@ int strbuf_getwholeline(struct strbuf *sb, FILE *fp, int term)
 	/* Translate slopbuf to NULL, as we cannot call realloc on it */
 	if (!sb->alloc)
 		sb->buf = NULL;
-	errno = 0;
 	r = getdelim(&sb->buf, &sb->alloc, term, fp);
 
 	if (r > 0) {
@@ -620,18 +586,14 @@ ssize_t strbuf_read_file(struct strbuf *sb, const char *path, size_t hint)
 {
 	int fd;
 	ssize_t len;
-	int saved_errno;
 
 	fd = open(path, O_RDONLY);
 	if (fd < 0)
 		return -1;
 	len = strbuf_read(sb, fd, hint);
-	saved_errno = errno;
 	close(fd);
-	if (len < 0) {
-		errno = saved_errno;
+	if (len < 0)
 		return -1;
-	}
 
 	return len;
 }
@@ -695,7 +657,7 @@ static void strbuf_add_urlencode(struct strbuf *sb, const char *s, size_t len,
 		    (!reserved && is_rfc3986_reserved(ch)))
 			strbuf_addch(sb, ch);
 		else
-			strbuf_addf(sb, "%%%02x", (unsigned char)ch);
+			strbuf_addf(sb, "%%%02x", ch);
 	}
 }
 
@@ -817,7 +779,7 @@ char *xstrfmt(const char *fmt, ...)
 }
 
 void strbuf_addftime(struct strbuf *sb, const char *fmt, const struct tm *tm,
-		     int tz_offset, int suppress_tz_name)
+		     int tz_offset, const char *tz_name)
 {
 	struct strbuf munged_fmt = STRBUF_INIT;
 	size_t hint = 128;
@@ -846,7 +808,8 @@ void strbuf_addftime(struct strbuf *sb, const char *fmt, const struct tm *tm,
 			fmt++;
 			break;
 		case 'Z':
-			if (suppress_tz_name) {
+			if (tz_name) {
+				strbuf_addstr(&munged_fmt, tz_name);
 				fmt++;
 				break;
 			}
@@ -881,12 +844,12 @@ void strbuf_addftime(struct strbuf *sb, const char *fmt, const struct tm *tm,
 	strbuf_setlen(sb, sb->len + len);
 }
 
-void strbuf_add_unique_abbrev(struct strbuf *sb, const struct object_id *oid,
+void strbuf_add_unique_abbrev(struct strbuf *sb, const unsigned char *sha1,
 			      int abbrev_len)
 {
 	int r;
 	strbuf_grow(sb, GIT_SHA1_HEXSZ + 1);
-	r = find_unique_abbrev_r(sb->buf + sb->len, oid, abbrev_len);
+	r = find_unique_abbrev_r(sb->buf + sb->len, sha1, abbrev_len);
 	strbuf_setlen(sb, sb->len + r);
 }
 
